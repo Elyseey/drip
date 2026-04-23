@@ -12,6 +12,7 @@ func TestServerConfigBandwidth(t *testing.T) {
 		yaml           string
 		wantBandwidth  string
 		wantMultiplier float64
+		wantBodyLimit  int64
 	}{
 		{
 			name: "bandwidth 1M with 2.5x burst",
@@ -22,9 +23,11 @@ tcp_port_min: 10000
 tcp_port_max: 20000
 bandwidth: 1M
 burst_multiplier: 2.5
+max_request_body_bytes: 10485760
 `,
 			wantBandwidth:  "1M",
 			wantMultiplier: 2.5,
+			wantBodyLimit:  10485760,
 		},
 		{
 			name: "no bandwidth limit",
@@ -36,6 +39,7 @@ tcp_port_max: 20000
 `,
 			wantBandwidth:  "",
 			wantMultiplier: 0,
+			wantBodyLimit:  0,
 		},
 	}
 
@@ -58,6 +62,23 @@ tcp_port_max: 20000
 			if cfg.BurstMultiplier != tt.wantMultiplier {
 				t.Errorf("BurstMultiplier = %v, want %v", cfg.BurstMultiplier, tt.wantMultiplier)
 			}
+			if cfg.MaxRequestBodyBytes != tt.wantBodyLimit {
+				t.Errorf("MaxRequestBodyBytes = %d, want %d", cfg.MaxRequestBodyBytes, tt.wantBodyLimit)
+			}
 		})
+	}
+}
+
+func TestServerConfigValidateRejectsNegativeRequestBodyLimit(t *testing.T) {
+	cfg := &ServerConfig{
+		Port:                8443,
+		Domain:              "example.com",
+		TCPPortMin:          10000,
+		TCPPortMax:          20000,
+		MaxRequestBodyBytes: -1,
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() expected error for negative MaxRequestBodyBytes")
 	}
 }

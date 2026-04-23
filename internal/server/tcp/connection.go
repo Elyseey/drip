@@ -3,6 +3,7 @@ package tcp
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"math"
@@ -21,6 +22,7 @@ import (
 	"drip/internal/shared/httputil"
 	"drip/internal/shared/protocol"
 	"drip/internal/shared/qos"
+	"drip/internal/shared/utils"
 
 	"go.uber.org/zap"
 )
@@ -112,7 +114,9 @@ func (c *Connection) Handle() error {
 	protocol.RegisterConnection()
 	defer c.Close()
 
-	c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if err := c.conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		c.logger.Warn("Failed to set read deadline", zap.Error(err))
+	}
 	reader := bufio.NewReader(c.conn)
 
 	peek, err := reader.Peek(4)
@@ -176,7 +180,7 @@ func (c *Connection) Handle() error {
 		return fmt.Errorf("tunnel type not allowed: %s", req.TunnelType)
 	}
 
-	if c.authToken != "" && req.Token != c.authToken {
+	if c.authToken != "" && subtle.ConstantTimeCompare([]byte(req.Token), []byte(c.authToken)) != 1 {
 		c.sendError("authentication_failed", "Invalid authentication token")
 		return fmt.Errorf("authentication failed")
 	}
@@ -246,6 +250,11 @@ func (c *Connection) Handle() error {
 			effectiveBandwidth = req.Bandwidth
 		}
 	}
+	// Clamp client-supplied bandwidth to reasonable maximum (1GB/s) to prevent bypass
+	const maxClientBandwidth int64 = 1 << 30
+	if effectiveBandwidth > maxClientBandwidth {
+		effectiveBandwidth = maxClientBandwidth
+	}
 	if effectiveBandwidth > 0 {
 		burstMultiplier := c.burstMultiplier
 		if burstMultiplier <= 0 {
@@ -284,7 +293,9 @@ func (c *Connection) Handle() error {
 		return fmt.Errorf("failed to send registration ack: %w", err)
 	}
 
-	c.conn.SetReadDeadline(time.Time{})
+	if err := c.conn.SetReadDeadline(time.Time{}); err != nil {
+		c.logger.Warn("Failed to clear read deadline", zap.Error(err))
+	}
 
 	if req.TunnelType == protocol.TunnelTypeTCP {
 		return c.handleTCPTunnel(reader)
@@ -409,7 +420,7 @@ func (c *Connection) sendError(code, message string) {
 	if c.frameWriter == nil {
 		_ = protocol.WriteFrame(c.conn, errFrame)
 	} else {
-		c.frameWriter.WriteFrame(errFrame)
+		_ = c.frameWriter.WriteFrame(errFrame)
 	}
 }
 
@@ -447,7 +458,7 @@ func (c *Connection) Close() {
 			}
 
 			if c.frameWriter != nil {
-				c.frameWriter.Close()
+				_ = c.frameWriter.Close()
 			}
 
 			if c.proxy != nil {
@@ -459,7 +470,7 @@ func (c *Connection) Close() {
 			}
 
 			if conn != nil {
-				conn.Close()
+				_ = conn.Close()
 			}
 
 			if c.port > 0 && c.portAlloc != nil {
@@ -503,28 +514,12 @@ func (c *Connection) SetAllowedTransports(transports []string) {
 
 // isTransportAllowed checks if a transport is allowed
 func (c *Connection) isTransportAllowed(transport string) bool {
-	if len(c.allowedTransports) == 0 {
-		return true
-	}
-	for _, t := range c.allowedTransports {
-		if strings.EqualFold(t, transport) {
-			return true
-		}
-	}
-	return false
+	return utils.ContainsIgnoreCase(c.allowedTransports, transport)
 }
 
 // isTunnelTypeAllowed checks if a tunnel type is allowed
 func (c *Connection) isTunnelTypeAllowed(tunnelType string) bool {
-	if len(c.allowedTunnelTypes) == 0 {
-		return true // Allow all by default
-	}
-	for _, t := range c.allowedTunnelTypes {
-		if strings.EqualFold(t, tunnelType) {
-			return true
-		}
-	}
-	return false
+	return utils.ContainsIgnoreCase(c.allowedTunnelTypes, tunnelType)
 }
 
 func (c *Connection) SetBandwidthConfig(bandwidth int64, burstMultiplier float64) {

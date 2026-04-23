@@ -131,7 +131,13 @@ func LoadClientConfig(path string) (*ClientConfig, error) {
 		path = DefaultClientConfigPath()
 	}
 
-	data, err := os.ReadFile(path)
+	// Prevent path traversal attacks
+	cleanPath := filepath.Clean(path)
+	if strings.Contains(cleanPath, "..") {
+		return nil, fmt.Errorf("invalid config path: path traversal detected")
+	}
+
+	data, err := os.ReadFile(cleanPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("config file not found at %s, please run 'drip config init' first", path)
@@ -152,12 +158,19 @@ func LoadClientConfig(path string) (*ClientConfig, error) {
 }
 
 // SaveClientConfig saves configuration to file
+// #nosec G117 -- Token is intentionally saved to config files with 0600 permissions
 func SaveClientConfig(config *ClientConfig, path string) error {
 	if path == "" {
 		path = DefaultClientConfigPath()
 	}
 
-	dir := filepath.Dir(path)
+	// Prevent path traversal attacks
+	cleanPath := filepath.Clean(path)
+	if strings.Contains(cleanPath, "..") {
+		return fmt.Errorf("invalid config path: path traversal detected")
+	}
+
+	dir := filepath.Dir(cleanPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
@@ -168,7 +181,7 @@ func SaveClientConfig(config *ClientConfig, path string) error {
 	}
 
 	// Write to file with secure permissions
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := os.WriteFile(cleanPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 

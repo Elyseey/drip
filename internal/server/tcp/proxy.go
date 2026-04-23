@@ -199,8 +199,8 @@ func (p *Proxy) handleConn(conn net.Conn) {
 		_ = tcpConn.SetNoDelay(true)
 		_ = tcpConn.SetKeepAlive(true)
 		_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
-		_ = tcpConn.SetReadBuffer(256 * 1024)
-		_ = tcpConn.SetWriteBuffer(256 * 1024)
+		_ = tcpConn.SetReadBuffer(512 * 1024)
+		_ = tcpConn.SetWriteBuffer(512 * 1024)
 	}
 
 	if p.openStream == nil {
@@ -223,7 +223,7 @@ func (p *Proxy) handleConn(conn net.Conn) {
 		case resultCh <- streamResult{s, err}:
 		case <-ctx.Done():
 			if s != nil {
-				s.Close()
+				_ = s.Close()
 			}
 		}
 	}()

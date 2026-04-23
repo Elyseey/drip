@@ -193,7 +193,7 @@ func startMultipleTunnels(cfg *config.ClientConfig, tunnels []*config.TunnelConf
 			// Run until stopped
 			select {
 			case <-stopChan:
-				client.Close()
+				_ = client.Close()
 			}
 		}(t)
 	}

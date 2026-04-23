@@ -6,8 +6,10 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"drip/internal/shared/httputil"
@@ -131,7 +133,7 @@ func (c *PoolClient) handleHTTPStream(stream net.Conn) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			stream.Close()
+			_ = stream.Close()
 		case <-copyDone:
 		}
 	}()
@@ -163,6 +165,8 @@ func (c *PoolClient) handleWebSocketUpgrade(cc net.Conn, req *http.Request) {
 	defer localConn.Close()
 
 	if c.tunnelType == protocol.TunnelTypeHTTPS {
+		c.logger.Warn("TLS certificate verification is disabled for local HTTPS WebSocket backend. " +
+			"Connections to the local service are vulnerable to man-in-the-middle attacks.")
 		tlsConn := tls.Client(localConn, &tls.Config{InsecureSkipVerify: true})
 		if err := tlsConn.Handshake(); err != nil {
 			httputil.WriteProxyError(cc, http.StatusBadGateway, "TLS handshake failed")
@@ -217,9 +221,15 @@ func (c *bufferedConn) Read(p []byte) (int, error) {
 	return c.reader.Read(p)
 }
 
+var localHTTPClientWarnOnce sync.Once
+
 func newLocalHTTPClient(tunnelType protocol.TunnelType) *http.Client {
 	var tlsConfig *tls.Config
 	if tunnelType == protocol.TunnelTypeHTTPS {
+		localHTTPClientWarnOnce.Do(func() {
+			log.Println("[SECURITY WARNING] TLS certificate verification is disabled for local HTTPS backend. " +
+				"Connections to the local service are vulnerable to man-in-the-middle attacks.")
+		})
 		tlsConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 	return &http.Client{

@@ -47,7 +47,7 @@ func (p *PortAllocator) Allocate() (int, error) {
 		if err != nil {
 			continue
 		}
-		ln.Close()
+		_ = ln.Close()
 
 		p.used[port] = true
 		return port, nil

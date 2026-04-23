@@ -45,7 +45,7 @@ func init() {
 }
 
 func runList(_ *cobra.Command, _ []string) error {
-	CleanupStaleDaemons()
+	_ = CleanupStaleDaemons()
 
 	daemons, err := ListAllDaemons()
 	if err != nil {
@@ -71,7 +71,7 @@ func runList(_ *cobra.Command, _ []string) error {
 	idx := 1
 	for _, d := range daemons {
 		if !IsProcessRunning(d.PID) {
-			RemoveDaemonInfo(d.Type, d.Port)
+			_ = RemoveDaemonInfo(d.Type, d.Port)
 			continue
 		}
 
@@ -120,7 +120,7 @@ func runInteractiveList(daemons []*DaemonInfo) error {
 		if IsProcessRunning(d.PID) {
 			runningDaemons = append(runningDaemons, d)
 		} else {
-			RemoveDaemonInfo(d.Type, d.Port)
+			_ = RemoveDaemonInfo(d.Type, d.Port)
 		}
 	}
 

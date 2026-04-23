@@ -1,6 +1,7 @@
 package tuning
 
 import (
+	"math"
 	"runtime"
 	"runtime/debug"
 )
@@ -17,8 +18,15 @@ type Config struct {
 	MemoryLimit int64
 }
 
+func safeUint64ToInt64(v uint64) int64 {
+	if v > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(v)
+}
+
 func DefaultClientConfig() Config {
-	total := int64(getSystemTotalMemory())
+	total := safeUint64ToInt64(getSystemTotalMemory())
 	limit := total / 4
 	if limit < 64*1024*1024 {
 		limit = 64 * 1024 * 1024
@@ -30,7 +38,7 @@ func DefaultClientConfig() Config {
 }
 
 func DefaultServerConfig() Config {
-	total := int64(getSystemTotalMemory())
+	total := safeUint64ToInt64(getSystemTotalMemory())
 	limit := total * 3 / 4
 	if limit < 128*1024*1024 {
 		limit = 128 * 1024 * 1024

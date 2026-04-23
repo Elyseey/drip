@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"drip/internal/server/metrics"
@@ -50,8 +50,10 @@ type Listener struct {
 	stopCh       chan struct{}
 	stopOnce     sync.Once
 	wg           sync.WaitGroup
-	connections  map[string]*Connection
-	connMu       sync.RWMutex
+	connections  sync.Map // map[string]*Connection, sync.Map for better concurrent read performance
+	connCount    atomic.Int64
+	connIDSeq    atomic.Int64 // unique connection ID sequence
+	connSem      chan struct{} // semaphore to limit max connections
 	workerPool   *pool.WorkerPool
 	recoverer    *recovery.Recoverer
 	panicMetrics *recovery.PanicMetrics
@@ -66,10 +68,12 @@ type Listener struct {
 	burstMultiplier    float64
 }
 
+const maxConns = 10000
+
 func NewListener(cfg ListenerConfig) *Listener {
 	numCPU := pool.NumCPU()
-	workers := numCPU * 5
-	queueSize := workers * 20
+	workers := numCPU * 8
+	queueSize := workers * 50
 	workerPool := pool.NewWorkerPool(workers, queueSize)
 
 	cfg.Logger.Info("Worker pool configured",
@@ -96,7 +100,7 @@ func NewListener(cfg ListenerConfig) *Listener {
 		publicPort:   cfg.PublicPort,
 		httpHandler:  cfg.HTTPHandler,
 		stopCh:       make(chan struct{}),
-		connections:  make(map[string]*Connection),
+		connSem:      make(chan struct{}, maxConns),
 		workerPool:   workerPool,
 		recoverer:    recoverer,
 		panicMetrics: panicMetrics,
@@ -147,8 +151,10 @@ func (l *Listener) Start() error {
 	}
 
 	if err := http2.ConfigureServer(l.httpServer, &http2.Server{
-		MaxConcurrentStreams: 1000,
-		IdleTimeout:          120 * time.Second,
+		MaxConcurrentStreams:         1000,
+		IdleTimeout:                  120 * time.Second,
+		MaxUploadBufferPerConnection: 1 << 20, // 1MB (default 64KB)
+		MaxUploadBufferPerStream:     1 << 20, // 1MB (default 64KB)
 	}); err != nil {
 		l.logger.Warn("Failed to configure HTTP/2", zap.Error(err))
 	}
@@ -180,7 +186,7 @@ func (l *Listener) acceptLoop() {
 		}
 
 		if tcpListener, ok := l.listener.(*net.TCPListener); ok {
-			tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
+			_ = tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
 		}
 
 		conn, err := l.listener.Accept()
@@ -197,33 +203,44 @@ func (l *Listener) acceptLoop() {
 			}
 		}
 
+		// Check connection limit
+		select {
+		case l.connSem <- struct{}{}:
+		default:
+			l.logger.Warn("Connection limit reached, rejecting connection",
+				zap.String("remote_addr", conn.RemoteAddr().String()),
+				zap.Int64("max_conns", maxConns),
+			)
+			_ = conn.Close()
+			continue
+		}
+
 		l.wg.Add(1)
+		connAddr := conn.RemoteAddr().String()
 		submitted := l.workerPool.Submit(l.recoverer.WrapGoroutine(
-			fmt.Sprintf("handleConnection-%s", conn.RemoteAddr().String()),
+			fmt.Sprintf("handleConnection-%s", connAddr),
 			func() {
 				l.handleConnection(conn)
 			},
 		))
 
 		if !submitted {
-			l.recoverer.SafeGo(
-				fmt.Sprintf("handleConnection-fallback-%s", conn.RemoteAddr().String()),
-				func() {
-					l.handleConnection(conn)
-				},
+			l.logger.Warn("Worker pool full, rejecting connection",
+				zap.String("remote_addr", connAddr),
 			)
+			l.wg.Done()
+			_ = conn.Close()
+			<-l.connSem
 		}
 	}
 }
 
 func (l *Listener) handleConnection(netConn net.Conn) {
 	defer l.wg.Done()
-	defer l.recoverer.RecoverWithCallback("handleConnection", func(p interface{}) {
-		connID := netConn.RemoteAddr().String()
-		l.connMu.Lock()
-		delete(l.connections, connID)
-		l.connMu.Unlock()
-	})
+	defer func() { <-l.connSem }() // release connection slot
+	remoteAddr := netConn.RemoteAddr().String()
+	connID := fmt.Sprintf("%s#%d", remoteAddr, l.connIDSeq.Add(1))
+	defer l.recoverer.Recover("handleConnection")
 
 	cleanupRegistered := false
 	defer func() {
@@ -236,7 +253,7 @@ func (l *Listener) handleConnection(netConn net.Conn) {
 	if tlsConn, ok := netConn.(*tls.Conn); ok {
 		if err := tlsConn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
 			l.logger.Warn("Failed to set read deadline",
-				zap.String("remote_addr", netConn.RemoteAddr().String()),
+				zap.String("remote_addr", remoteAddr),
 				zap.Error(err),
 			)
 			return
@@ -244,7 +261,7 @@ func (l *Listener) handleConnection(netConn net.Conn) {
 
 		if err := tlsConn.Handshake(); err != nil {
 			l.logger.Warn("TLS handshake failed",
-				zap.String("remote_addr", netConn.RemoteAddr().String()),
+				zap.String("remote_addr", remoteAddr),
 				zap.Error(err),
 			)
 			return
@@ -252,23 +269,23 @@ func (l *Listener) handleConnection(netConn net.Conn) {
 
 		if err := tlsConn.SetReadDeadline(time.Time{}); err != nil {
 			l.logger.Warn("Failed to clear read deadline",
-				zap.String("remote_addr", netConn.RemoteAddr().String()),
+				zap.String("remote_addr", remoteAddr),
 				zap.Error(err),
 			)
 			return
 		}
 
 		if tcpConn, ok := tlsConn.NetConn().(*net.TCPConn); ok {
-			tcpConn.SetNoDelay(true)
-			tcpConn.SetKeepAlive(true)
-			tcpConn.SetKeepAlivePeriod(30 * time.Second)
-			tcpConn.SetReadBuffer(256 * 1024)
-			tcpConn.SetWriteBuffer(256 * 1024)
+			_ = tcpConn.SetNoDelay(true)
+			_ = tcpConn.SetKeepAlive(true)
+			_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
+			_ = tcpConn.SetReadBuffer(512 * 1024)
+			_ = tcpConn.SetWriteBuffer(512 * 1024)
 		}
 
 		state := tlsConn.ConnectionState()
-		l.logger.Info("New TLS connection",
-			zap.String("remote_addr", netConn.RemoteAddr().String()),
+		l.logger.Debug("New TLS connection",
+			zap.String("remote_addr", remoteAddr),
 			zap.Uint16("tls_version", state.Version),
 			zap.String("cipher_suite", tls.CipherSuiteName(state.CipherSuite)),
 		)
@@ -282,15 +299,15 @@ func (l *Listener) handleConnection(netConn net.Conn) {
 	} else {
 		// Handle plain TCP connections (reverse proxy mode)
 		if tcpConn, ok := netConn.(*net.TCPConn); ok {
-			tcpConn.SetNoDelay(true)
-			tcpConn.SetKeepAlive(true)
-			tcpConn.SetKeepAlivePeriod(30 * time.Second)
-			tcpConn.SetReadBuffer(256 * 1024)
-			tcpConn.SetWriteBuffer(256 * 1024)
+			_ = tcpConn.SetNoDelay(true)
+			_ = tcpConn.SetKeepAlive(true)
+			_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
+			_ = tcpConn.SetReadBuffer(512 * 1024)
+			_ = tcpConn.SetWriteBuffer(512 * 1024)
 		}
 
-		l.logger.Info("New plain TCP connection (reverse proxy mode)",
-			zap.String("remote_addr", netConn.RemoteAddr().String()),
+		l.logger.Debug("New plain TCP connection (reverse proxy mode)",
+			zap.String("remote_addr", remoteAddr),
 		)
 	}
 
@@ -311,24 +328,21 @@ func (l *Listener) handleConnection(netConn net.Conn) {
 	conn.SetAllowedTransports(l.allowedTransports)
 	conn.SetBandwidthConfig(l.bandwidth, l.burstMultiplier)
 
-	connID := netConn.RemoteAddr().String()
-	l.connMu.Lock()
-	l.connections[connID] = conn
-	l.connMu.Unlock()
+	l.connections.Store(connID, conn)
+	l.connCount.Add(1)
 
 	// Update connection metrics
 	metrics.TotalConnections.Inc()
 	metrics.ActiveConnections.Inc()
 
 	defer func() {
-		l.connMu.Lock()
-		delete(l.connections, connID)
-		l.connMu.Unlock()
+		l.connections.Delete(connID)
+		l.connCount.Add(-1)
 
 		metrics.ActiveConnections.Dec()
 
 		if !conn.IsHandedOff() {
-			netConn.Close()
+			_ = netConn.Close()
 		}
 	}()
 	cleanupRegistered = true
@@ -342,12 +356,12 @@ func (l *Listener) handleConnection(netConn net.Conn) {
 
 		if utils.IsProtocolError(errStr) {
 			l.logger.Warn("Protocol validation failed",
-				zap.String("remote_addr", connID),
+				zap.String("remote_addr", remoteAddr),
 				zap.Error(err),
 			)
 		} else {
 			l.logger.Error("Connection handling failed",
-				zap.String("remote_addr", connID),
+				zap.String("remote_addr", remoteAddr),
 				zap.Error(err),
 			)
 		}
@@ -370,7 +384,7 @@ func (l *Listener) Stop() error {
 		}
 
 		if l.httpListener != nil {
-			l.httpListener.Close()
+			_ = l.httpListener.Close()
 		}
 
 		if l.listener != nil {
@@ -379,11 +393,10 @@ func (l *Listener) Stop() error {
 			}
 		}
 
-		l.connMu.Lock()
-		for _, conn := range l.connections {
-			conn.Close()
-		}
-		l.connMu.Unlock()
+		l.connections.Range(func(key, value interface{}) bool {
+			value.(*Connection).Close()
+			return true
+		})
 
 		l.wg.Wait()
 
@@ -402,20 +415,32 @@ func (l *Listener) Stop() error {
 }
 
 func (l *Listener) GetActiveConnections() int {
-	l.connMu.RLock()
-	defer l.connMu.RUnlock()
-	return len(l.connections)
+	return int(l.connCount.Load())
 }
 
 // HandleWSConnection implements proxy.WSConnectionHandler for WebSocket tunnel connections
 func (l *Listener) HandleWSConnection(conn net.Conn, remoteAddr string) {
+	// Enforce connection limit for WebSocket connections too
+	select {
+	case l.connSem <- struct{}{}:
+	default:
+		l.logger.Warn("Connection limit reached, rejecting WebSocket connection",
+			zap.String("remote_addr", remoteAddr),
+		)
+		_ = conn.Close()
+		return
+	}
+
 	l.wg.Add(1)
 	defer l.wg.Done()
+	defer func() { <-l.connSem }()
 
-	connID := remoteAddr
-	if connID == "" {
-		connID = conn.RemoteAddr().String()
+	connAddr := conn.RemoteAddr().String()
+	displayAddr := remoteAddr
+	if displayAddr == "" {
+		displayAddr = connAddr
 	}
+	connID := fmt.Sprintf("%s#%d", displayAddr, l.connIDSeq.Add(1))
 
 	l.logger.Info("Handling WebSocket tunnel connection",
 		zap.String("remote_addr", connID),
@@ -423,7 +448,7 @@ func (l *Listener) HandleWSConnection(conn net.Conn, remoteAddr string) {
 
 	remoteIP := netutil.ExtractIP(remoteAddr)
 	if remoteIP == "" {
-		remoteIP = netutil.ExtractIP(conn.RemoteAddr().String())
+		remoteIP = netutil.ExtractIP(connAddr)
 	}
 	if netutil.IsPrivateIP(remoteIP) {
 		remoteIP = ""
@@ -448,22 +473,20 @@ func (l *Listener) HandleWSConnection(conn net.Conn, remoteAddr string) {
 	tcpConn.SetAllowedTransports(l.allowedTransports)
 	tcpConn.SetBandwidthConfig(l.bandwidth, l.burstMultiplier)
 
-	l.connMu.Lock()
-	l.connections[connID] = tcpConn
-	l.connMu.Unlock()
+	l.connections.Store(connID, tcpConn)
+	l.connCount.Add(1)
 
 	metrics.TotalConnections.Inc()
 	metrics.ActiveConnections.Inc()
 
 	defer func() {
-		l.connMu.Lock()
-		delete(l.connections, connID)
-		l.connMu.Unlock()
+		l.connections.Delete(connID)
+		l.connCount.Add(-1)
 
 		metrics.ActiveConnections.Dec()
 
 		if !tcpConn.IsHandedOff() {
-			conn.Close()
+			_ = conn.Close()
 		}
 	}()
 
@@ -511,13 +534,5 @@ func (l *Listener) SetBurstMultiplier(multiplier float64) {
 
 // IsTransportAllowed checks if a transport is allowed
 func (l *Listener) IsTransportAllowed(transport string) bool {
-	if len(l.allowedTransports) == 0 {
-		return true
-	}
-	for _, t := range l.allowedTransports {
-		if strings.EqualFold(t, transport) {
-			return true
-		}
-	}
-	return false
+	return utils.ContainsIgnoreCase(l.allowedTransports, transport)
 }

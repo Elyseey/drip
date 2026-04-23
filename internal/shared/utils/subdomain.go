@@ -2,6 +2,7 @@ package utils
 
 import (
 	"crypto/rand"
+	"fmt"
 	"math/big"
 	"regexp"
 )
@@ -13,7 +14,7 @@ const (
 	DefaultSubdomainLength = 6
 )
 
-var subdomainRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
+var subdomainRegex = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // GenerateSubdomain generates a random subdomain
 func GenerateSubdomain(length int) string {
@@ -27,9 +28,9 @@ func GenerateSubdomain(length int) string {
 	for i := 0; i < length; i++ {
 		num, err := rand.Int(rand.Reader, charsLen)
 		if err != nil {
-			// Fallback to simple random if crypto/rand fails
-			result[i] = SubdomainChars[i%len(SubdomainChars)]
-			continue
+			// crypto/rand should never fail in practice. If it does,
+			// we cannot generate a secure random subdomain.
+			panic(fmt.Sprintf("failed to generate random subdomain: %v", err))
 		}
 		result[i] = SubdomainChars[num.Int64()]
 	}
@@ -45,22 +46,23 @@ func ValidateSubdomain(subdomain string) bool {
 	return subdomainRegex.MatchString(subdomain)
 }
 
+var reservedSubdomains = map[string]bool{
+	"www":     true,
+	"api":     true,
+	"admin":   true,
+	"app":     true,
+	"mail":    true,
+	"ftp":     true,
+	"blog":    true,
+	"shop":    true,
+	"status":  true,
+	"health":  true,
+	"test":    true,
+	"dev":     true,
+	"staging": true,
+}
+
 // IsReserved checks if a subdomain is reserved
 func IsReserved(subdomain string) bool {
-	reserved := map[string]bool{
-		"www":     true,
-		"api":     true,
-		"admin":   true,
-		"app":     true,
-		"mail":    true,
-		"ftp":     true,
-		"blog":    true,
-		"shop":    true,
-		"status":  true,
-		"health":  true,
-		"test":    true,
-		"dev":     true,
-		"staging": true,
-	}
-	return reserved[subdomain]
+	return reservedSubdomains[subdomain]
 }

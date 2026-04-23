@@ -63,7 +63,7 @@ func stopDaemon(tunnelType string, port int) error {
 	}
 
 	if !IsProcessRunning(info.PID) {
-		RemoveDaemonInfo(tunnelType, port)
+		_ = RemoveDaemonInfo(tunnelType, port)
 		return fmt.Errorf("tunnel was not running (cleaned up stale entry)")
 	}
 
@@ -71,14 +71,14 @@ func stopDaemon(tunnelType string, port int) error {
 		return fmt.Errorf("failed to stop tunnel: %w", err)
 	}
 
-	RemoveDaemonInfo(tunnelType, port)
+	_ = RemoveDaemonInfo(tunnelType, port)
 
 	fmt.Printf("\033[32m✓\033[0m Stopped %s tunnel on port %d (PID: %d)\n", tunnelType, port, info.PID)
 	return nil
 }
 
 func stopAllDaemons() error {
-	CleanupStaleDaemons()
+	_ = CleanupStaleDaemons()
 
 	daemons, err := ListAllDaemons()
 	if err != nil {
@@ -95,7 +95,7 @@ func stopAllDaemons() error {
 
 	for _, d := range daemons {
 		if !IsProcessRunning(d.PID) {
-			RemoveDaemonInfo(d.Type, d.Port)
+			_ = RemoveDaemonInfo(d.Type, d.Port)
 			continue
 		}
 
@@ -105,7 +105,7 @@ func stopAllDaemons() error {
 			continue
 		}
 
-		RemoveDaemonInfo(d.Type, d.Port)
+		_ = RemoveDaemonInfo(d.Type, d.Port)
 		fmt.Printf("\033[32m✓\033[0m Stopped %s tunnel on port %d (PID: %d)\n", d.Type, d.Port, d.PID)
 		stopped++
 	}

@@ -55,7 +55,7 @@ func (p *WorkerPool) worker() {
 }
 
 // Submit submits a job to the worker pool
-// Returns false if the pool is closed or the queue is full
+// Returns false if the pool is closed or the queue is full (job is NOT executed)
 func (p *WorkerPool) Submit(job func()) bool {
 	if job == nil {
 		return false
@@ -68,14 +68,10 @@ func (p *WorkerPool) Submit(job func()) bool {
 	}
 	p.mu.RUnlock()
 
-	// Non-blocking send
 	select {
 	case p.jobQueue <- job:
 		return true
 	default:
-		// Queue is full, fall back to direct execution
-		// This prevents blocking when pool is overloaded
-		go job()
 		return false
 	}
 }

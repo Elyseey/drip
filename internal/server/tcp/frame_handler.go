@@ -60,7 +60,9 @@ func (fh *FrameHandler) HandleFrames() error {
 		default:
 		}
 
-		fh.conn.SetReadDeadline(time.Now().Add(constants.RequestTimeout))
+		if err := fh.conn.SetReadDeadline(time.Now().Add(constants.RequestTimeout)); err != nil {
+			fh.logger.Warn("Failed to set read deadline", zap.Error(err))
+		}
 		frame, err := protocol.ReadFrame(fh.reader)
 		if err != nil {
 			return fh.handleReadError(err)
@@ -68,7 +70,7 @@ func (fh *FrameHandler) HandleFrames() error {
 
 		sf := protocol.WithFrame(frame)
 		err = fh.processFrame(sf)
-		sf.Close()
+		_ = sf.Close()
 
 		if err != nil {
 			return err

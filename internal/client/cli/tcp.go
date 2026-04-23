@@ -57,7 +57,7 @@ func init() {
 	tcpCmd.Flags().StringVar(&transport, "transport", "auto", "Transport protocol: auto, tcp, wss (WebSocket over TLS)")
 	tcpCmd.Flags().StringVar(&bandwidth, "bandwidth", "", "Bandwidth limit (e.g., 1M, 500K, 1G)")
 	tcpCmd.Flags().BoolVar(&daemonMarker, "daemon-child", false, "Internal flag for daemon child process")
-	tcpCmd.Flags().MarkHidden("daemon-child")
+	_ = tcpCmd.Flags().MarkHidden("daemon-child")
 	rootCmd.AddCommand(tcpCmd)
 }
 

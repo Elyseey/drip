@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bufio"
-	"context"
 	"io"
 	"net"
 	"net/http"
@@ -38,7 +37,7 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request, tconn 
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
-		stream.Close()
+		_ = stream.Close()
 		tconn.DecActiveConnections()
 		http.Error(w, "WebSocket not supported", http.StatusInternalServerError)
 		return
@@ -46,15 +45,15 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request, tconn 
 
 	clientConn, clientBuf, err := hj.Hijack()
 	if err != nil {
-		stream.Close()
+		_ = stream.Close()
 		tconn.DecActiveConnections()
 		http.Error(w, "Failed to hijack connection", http.StatusInternalServerError)
 		return
 	}
 
 	if err := r.Write(stream); err != nil {
-		stream.Close()
-		clientConn.Close()
+		_ = stream.Close()
+		_ = clientConn.Close()
 		tconn.DecActiveConnections()
 		return
 	}
@@ -62,7 +61,7 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request, tconn 
 	var limitedStream net.Conn = stream
 	if limiter := tconn.GetLimiter(); limiter != nil && limiter.IsLimited() {
 		if l, ok := limiter.(*qos.Limiter); ok {
-			limitedStream = qos.NewLimitedConn(context.Background(), stream, l)
+			limitedStream = qos.NewLimitedConn(r.Context(), stream, l)
 		}
 	}
 
@@ -79,7 +78,7 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request, tconn 
 			}
 		}
 
-		_ = netutil.PipeWithCallbacks(context.Background(), limitedStream, clientRW,
+		_ = netutil.PipeWithCallbacks(r.Context(), limitedStream, clientRW,
 			func(n int64) { tconn.AddBytesOut(n) },
 			func(n int64) { tconn.AddBytesIn(n) },
 		)

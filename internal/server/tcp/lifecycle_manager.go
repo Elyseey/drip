@@ -104,7 +104,7 @@ func (clm *ConnectionLifecycleManager) Close() {
 		}
 
 		if clm.frameWriter != nil {
-			clm.frameWriter.Close()
+			_ = clm.frameWriter.Close()
 		}
 
 		if clm.proxy != nil {
@@ -116,7 +116,7 @@ func (clm *ConnectionLifecycleManager) Close() {
 		}
 
 		if clm.conn != nil {
-			clm.conn.Close()
+			_ = clm.conn.Close()
 		}
 
 		if clm.port > 0 && clm.portAlloc != nil {

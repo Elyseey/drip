@@ -3,12 +3,13 @@ package cli
 import (
 	"fmt"
 	"net/http"
-	_ "net/http/pprof"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"drip/internal/server/proxy"
 	"drip/internal/server/tcp"
@@ -22,21 +23,22 @@ import (
 )
 
 var (
-	serverPort         int
-	serverPublicPort   int
-	serverDomain       string
-	serverTunnelDomain string
-	serverAuthToken    string
-	serverMetricsToken string
-	serverDebug        bool
-	serverTCPPortMin   int
-	serverTCPPortMax   int
-	serverTLSCert      string
-	serverTLSKey       string
-	serverPprofPort    int
-	serverTransports   string
-	serverTunnelTypes  string
-	serverConfigFile   string
+	serverPort                int
+	serverPublicPort          int
+	serverDomain              string
+	serverTunnelDomain        string
+	serverAuthToken           string
+	serverMetricsToken        string
+	serverDebug               bool
+	serverTCPPortMin          int
+	serverTCPPortMax          int
+	serverTLSCert             string
+	serverTLSKey              string
+	serverPprofPort           int
+	serverTransports          string
+	serverTunnelTypes         string
+	serverMaxRequestBodyBytes int64
+	serverConfigFile          string
 )
 
 var serverCmd = &cobra.Command{
@@ -75,6 +77,7 @@ func init() {
 	// Transport and tunnel type restrictions
 	serverCmd.Flags().StringVar(&serverTransports, "transports", getEnvString("DRIP_TRANSPORTS", "tcp,wss"), "Allowed transports: tcp,wss (env: DRIP_TRANSPORTS)")
 	serverCmd.Flags().StringVar(&serverTunnelTypes, "tunnel-types", getEnvString("DRIP_TUNNEL_TYPES", "http,https,tcp"), "Allowed tunnel types: http,https,tcp (env: DRIP_TUNNEL_TYPES)")
+	serverCmd.Flags().Int64Var(&serverMaxRequestBodyBytes, "max-request-body-bytes", getEnvInt64("DRIP_MAX_REQUEST_BODY_BYTES", 0), "Maximum tunneled HTTP request body size in bytes; 0 disables the limit (env: DRIP_MAX_REQUEST_BODY_BYTES)")
 }
 
 func runServer(cmd *cobra.Command, _ []string) error {
@@ -206,6 +209,13 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		cfg.AllowedTunnelTypes = parseCommaSeparated(serverTunnelTypes)
 	}
 
+	// MaxRequestBodyBytes
+	if cmd.Flags().Changed("max-request-body-bytes") {
+		cfg.MaxRequestBodyBytes = serverMaxRequestBodyBytes
+	} else if os.Getenv("DRIP_MAX_REQUEST_BODY_BYTES") != "" {
+		cfg.MaxRequestBodyBytes = serverMaxRequestBodyBytes
+	}
+
 	// TLSEnabled
 	if os.Getenv("DRIP_TLS_ENABLED") != "" {
 		cfg.TLSEnabled = os.Getenv("DRIP_TLS_ENABLED") == "true" || os.Getenv("DRIP_TLS_ENABLED") == "1"
@@ -244,7 +254,23 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		go func() {
 			pprofAddr := fmt.Sprintf("localhost:%d", cfg.PprofPort)
 			logger.Info("Starting pprof server", zap.String("address", pprofAddr))
-			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("/debug/pprof/", pprof.Index)
+			mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+			mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+			mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+			mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+			srv := &http.Server{
+				Addr:              pprofAddr,
+				Handler:           mux,
+				ReadHeaderTimeout: 5 * time.Second,
+				ReadTimeout:       10 * time.Second,
+				WriteTimeout:      30 * time.Second,
+				IdleTimeout:       120 * time.Second,
+			}
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				logger.Error("pprof server failed", zap.Error(err))
 			}
 		}()
@@ -288,12 +314,13 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	listenAddr := fmt.Sprintf("0.0.0.0:%d", cfg.Port)
 
 	httpHandler := proxy.NewHandler(proxy.HandlerConfig{
-		Manager:      tunnelManager,
-		Logger:       logger,
-		ServerDomain: cfg.Domain,
-		TunnelDomain: cfg.TunnelDomain,
-		AuthToken:    cfg.AuthToken,
-		MetricsToken: cfg.MetricsToken,
+		Manager:             tunnelManager,
+		Logger:              logger,
+		ServerDomain:        cfg.Domain,
+		TunnelDomain:        cfg.TunnelDomain,
+		AuthToken:           cfg.AuthToken,
+		MetricsToken:        cfg.MetricsToken,
+		MaxRequestBodyBytes: cfg.MaxRequestBodyBytes,
 	})
 	httpHandler.SetAllowedTransports(cfg.AllowedTransports)
 	httpHandler.SetAllowedTunnelTypes(cfg.AllowedTunnelTypes)
@@ -328,6 +355,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			zap.String("bandwidth", cfg.Bandwidth),
 			zap.Int64("bandwidth_bytes_sec", bandwidth),
 			zap.Float64("burst_multiplier", burstMultiplier),
+		)
+	}
+	if cfg.MaxRequestBodyBytes > 0 {
+		logger.Info("HTTP request body limit configured",
+			zap.Int64("max_request_body_bytes", cfg.MaxRequestBodyBytes),
 		)
 	}
 
@@ -368,6 +400,15 @@ func runServer(cmd *cobra.Command, _ []string) error {
 func getEnvInt(key string, defaultVal int) int {
 	if val := os.Getenv(key); val != "" {
 		if i, err := strconv.Atoi(val); err == nil {
+			return i
+		}
+	}
+	return defaultVal
+}
+
+func getEnvInt64(key string, defaultVal int64) int64 {
+	if val := os.Getenv(key); val != "" {
+		if i, err := strconv.ParseInt(val, 10, 64); err == nil {
 			return i
 		}
 	}
