@@ -25,7 +25,7 @@ func CleanHopByHopHeaders(headers http.Header) {
 	if connectionHeaders := headers.Get("Connection"); connectionHeaders != "" {
 		for _, token := range strings.Split(connectionHeaders, ",") {
 			if t := strings.TrimSpace(token); t != "" {
-				headers.Del(http.CanonicalHeaderKey(t))
+				headers.Del(t)
 			}
 		}
 	}

@@ -3,34 +3,12 @@ package qos
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
 )
-
-type errorAfterConn struct {
-	mockConn
-	writeLimit int
-	written    int
-}
-
-func (c *errorAfterConn) Write(b []byte) (int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	remaining := c.writeLimit - c.written
-	if remaining <= 0 {
-		return 0, errors.New("write error")
-	}
-	if len(b) > remaining {
-		b = b[:remaining]
-	}
-	c.writeBuf = append(c.writeBuf, b...)
-	c.written += len(b)
-	return len(b), nil
-}
 
 func TestWriteLargerThanBurst(t *testing.T) {
 	bandwidth := int64(10 * 1024)

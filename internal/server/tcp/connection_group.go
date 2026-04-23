@@ -72,7 +72,6 @@ type ConnectionGroup struct {
 	TunnelType   protocol.TunnelType
 	RegisteredAt time.Time
 	LastActivity time.Time
-	sessionIdx   uint32
 	mu           sync.RWMutex
 	stopCh       chan struct{}
 	logger       *zap.Logger

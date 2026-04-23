@@ -145,13 +145,13 @@ func (h *HTTPRequestHandler) handleLegacy() error {
 		}
 
 		if h.ctx != nil {
-			if ctxWithContext, ok := h.ctx.(interface{ Done() <-chan struct{} }); ok {
-				req = req.WithContext(ctxWithContext.(interface {
-					Done() <-chan struct{}
-					Deadline() (deadline time.Time, ok bool)
-					Err() error
-					Value(key interface{}) interface{}
-				}))
+			if ctx, ok := h.ctx.(interface {
+				Done() <-chan struct{}
+				Deadline() (deadline time.Time, ok bool)
+				Err() error
+				Value(key interface{}) interface{}
+			}); ok {
+				req = req.WithContext(ctx)
 			}
 		}
 

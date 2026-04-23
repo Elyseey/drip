@@ -191,10 +191,8 @@ func startMultipleTunnels(cfg *config.ClientConfig, tunnels []*config.TunnelConf
 			fmt.Printf("  ✓ %s: %s\n", tunnel.Name, client.GetURL())
 
 			// Run until stopped
-			select {
-			case <-stopChan:
-				_ = client.Close()
-			}
+			<-stopChan
+			_ = client.Close()
 		}(t)
 	}
 

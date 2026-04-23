@@ -50,8 +50,6 @@ type authRateLimiter struct {
 	stopCh  chan struct{}
 }
 
-var cleanupShutdownOnce sync.Once
-
 var authLimiter = &authRateLimiter{
 	entries: make(map[string]*authRateLimitEntry),
 	stopCh:  make(chan struct{}),
@@ -65,13 +63,6 @@ var sessionStore = &authSessionStore{
 func init() {
 	go authLimiter.startCleanupLoop()
 	go sessionStore.startCleanupLoop()
-}
-
-func initCleanupShutdown() {
-	cleanupShutdownOnce.Do(func() {
-		close(authLimiter.stopCh)
-		close(sessionStore.stopCh)
-	})
 }
 
 func (rl *authRateLimiter) startCleanupLoop() {
@@ -320,10 +311,6 @@ func (h *Handler) serveBearerAuthRequired(w http.ResponseWriter, realm string) {
 	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="%s"`, realm))
 	w.Header().Set("Cache-Control", "no-store")
 	http.Error(w, "Unauthorized: provide bearer token via Authorization header", http.StatusUnauthorized)
-}
-
-func (h *Handler) handleProxyLogin(w http.ResponseWriter, r *http.Request, tconn *tunnel.Connection, subdomain string) {
-	h.handleProxyLoginWithRateLimit(w, r, tconn, subdomain, "")
 }
 
 func (h *Handler) handleProxyLoginWithRateLimit(w http.ResponseWriter, r *http.Request, tconn *tunnel.Connection, subdomain string, clientIP string) {
