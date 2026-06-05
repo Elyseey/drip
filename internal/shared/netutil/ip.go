@@ -60,12 +60,11 @@ func ExtractClientIP(r *http.Request) string {
 	if IsPrivateIP(remoteIP) {
 		// Check X-Forwarded-For header (may contain multiple IPs)
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			// Walk from right to left, skipping private IPs (intermediate proxies).
-			// The rightmost non-private IP is the real client IP set by a trusted proxy.
-			// This prevents spoofing: clients can inject leftmost entries but not rightmost.
+			// Walk from left to right, preserving the original public client IP.
+			// Trusted edge proxies should sanitize any inbound X-Forwarded-For value.
 			parts := strings.Split(xff, ",")
-			for i := len(parts) - 1; i >= 0; i-- {
-				ip := strings.TrimSpace(parts[i])
+			for _, part := range parts {
+				ip := strings.TrimSpace(part)
 				if ip != "" && net.ParseIP(ip) != nil {
 					if !IsPrivateIP(ip) {
 						return ip

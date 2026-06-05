@@ -356,10 +356,14 @@ type streamResult struct {
 }
 
 func (h *Handler) openStreamWithTimeout(tconn *tunnel.Connection) (net.Conn, error) {
+	return h.openStream(tconn, openStreamTimeout)
+}
+
+func (h *Handler) openStream(tconn *tunnel.Connection, timeout time.Duration) (net.Conn, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ch := make(chan streamResult, 1)
+	ch := make(chan streamResult)
 
 	go func() {
 		s, err := tconn.OpenStream()
@@ -375,7 +379,7 @@ func (h *Handler) openStreamWithTimeout(tconn *tunnel.Connection) (net.Conn, err
 	select {
 	case r := <-ch:
 		return r.stream, r.err
-	case <-time.After(openStreamTimeout):
+	case <-time.After(timeout):
 		cancel()
 		return nil, fmt.Errorf("open stream timeout")
 	}
