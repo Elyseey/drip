@@ -14,10 +14,10 @@ func getSystemTotalMemory() uint64 {
 
 	_, _, errno := syscall.Syscall6(
 		syscall.SYS___SYSCTL,
-		uintptr(unsafe.Pointer(&mib[0])),
+		uintptr(unsafe.Pointer(&mib[0])), // #nosec G103 -- required for sysctl syscall
 		2,
-		uintptr(unsafe.Pointer(&value)),
-		uintptr(unsafe.Pointer(&size)),
+		uintptr(unsafe.Pointer(&value)), // #nosec G103 -- required for sysctl syscall
+		uintptr(unsafe.Pointer(&size)),  // #nosec G103 -- required for sysctl syscall
 		0,
 		0,
 	)

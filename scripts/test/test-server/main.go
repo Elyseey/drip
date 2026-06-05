@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"runtime"
+	"time"
 )
 
 func main() {
@@ -29,5 +30,14 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", *port)
 	log.Printf("Test server listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           nil,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	log.Fatal(srv.ListenAndServe())
 }

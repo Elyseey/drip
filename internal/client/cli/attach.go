@@ -40,7 +40,7 @@ func init() {
 }
 
 func runAttach(_ *cobra.Command, args []string) error {
-	CleanupStaleDaemons()
+	_ = CleanupStaleDaemons()
 
 	daemons, err := ListAllDaemons()
 	if err != nil {
@@ -74,7 +74,7 @@ func runAttach(_ *cobra.Command, args []string) error {
 		for _, d := range daemons {
 			if d.Type == tunnelType && d.Port == port {
 				if !IsProcessRunning(d.PID) {
-					RemoveDaemonInfo(d.Type, d.Port)
+					_ = RemoveDaemonInfo(d.Type, d.Port)
 					return fmt.Errorf("tunnel is not running (cleaned up stale entry)")
 				}
 				selectedDaemon = d
@@ -106,7 +106,7 @@ func selectDaemonInteractive(daemons []*DaemonInfo) (*DaemonInfo, error) {
 		if IsProcessRunning(d.PID) {
 			runningDaemons = append(runningDaemons, d)
 		} else {
-			RemoveDaemonInfo(d.Type, d.Port)
+			_ = RemoveDaemonInfo(d.Type, d.Port)
 		}
 	}
 
@@ -186,7 +186,7 @@ func attachToDaemon(daemon *DaemonInfo) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	tailCmd := exec.Command("tail", "-f", logPath)
+	tailCmd := exec.Command("tail", "-f", logPath) // #nosec G204 -- fixed command with validated log path
 	tailCmd.Stdout = os.Stdout
 	tailCmd.Stderr = os.Stderr
 

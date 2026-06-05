@@ -3,6 +3,7 @@ package httputil
 import (
 	"fmt"
 	"net"
+	"strings"
 )
 
 // HTTPErrorResponse represents a standard HTTP error response.
@@ -29,6 +30,9 @@ var (
 
 // WriteErrorResponse writes an HTTP error response to the connection.
 func WriteErrorResponse(conn net.Conn, resp *HTTPErrorResponse) error {
+	statusText := strings.NewReplacer("\r", "", "\n", "").Replace(resp.StatusText)
+	message := strings.NewReplacer("\r", "", "\n", "").Replace(resp.Message)
+
 	response := fmt.Sprintf(
 		"HTTP/1.1 %d %s\r\n"+
 			"Content-Type: text/plain\r\n"+
@@ -37,9 +41,9 @@ func WriteErrorResponse(conn net.Conn, resp *HTTPErrorResponse) error {
 			"\r\n"+
 			"%s\r\n",
 		resp.StatusCode,
-		resp.StatusText,
-		len(resp.Message)+2,
-		resp.Message,
+		statusText,
+		len(message)+2,
+		message,
 	)
 	_, err := conn.Write([]byte(response))
 	return err

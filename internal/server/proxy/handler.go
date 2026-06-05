@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"drip/internal/shared/pool"
 	"drip/internal/shared/protocol"
 	"drip/internal/shared/qos"
+	"drip/internal/shared/utils"
 )
 
 // bufio.Reader pool to reduce allocations on hot path
@@ -30,25 +32,34 @@ var bufioReaderPool = sync.Pool{
 	},
 }
 
+// bufioWriter pool for HTTP request forwarding
+var bufioWriterPool = sync.Pool{
+	New: func() interface{} {
+		return bufio.NewWriterSize(nil, 32*1024)
+	},
+}
+
 const openStreamTimeout = 3 * time.Second
 
 type HandlerConfig struct {
-	Manager      *tunnel.Manager
-	Logger       *zap.Logger
-	ServerDomain string
-	TunnelDomain string
-	AuthToken    string
-	MetricsToken string
+	Manager             *tunnel.Manager
+	Logger              *zap.Logger
+	ServerDomain        string
+	TunnelDomain        string
+	AuthToken           string
+	MetricsToken        string
+	MaxRequestBodyBytes int64
 }
 
 type Handler struct {
-	manager      *tunnel.Manager
-	logger       *zap.Logger
-	serverDomain string
-	tunnelDomain string
-	authToken    string
-	metricsToken string
-	publicPort   int
+	manager             *tunnel.Manager
+	logger              *zap.Logger
+	serverDomain        string
+	tunnelDomain        string
+	authToken           string
+	metricsToken        string
+	publicPort          int
+	maxRequestBodyBytes int64
 
 	// WebSocket tunnel support
 	wsUpgrader    websocket.Upgrader
@@ -65,18 +76,41 @@ type WSConnectionHandler interface {
 }
 
 func NewHandler(cfg HandlerConfig) *Handler {
+	serverDomain := cfg.ServerDomain
+	tunnelDomain := cfg.TunnelDomain
 	return &Handler{
-		manager:      cfg.Manager,
-		logger:       cfg.Logger,
-		serverDomain: cfg.ServerDomain,
-		tunnelDomain: cfg.TunnelDomain,
-		authToken:    cfg.AuthToken,
-		metricsToken: cfg.MetricsToken,
+		manager:             cfg.Manager,
+		logger:              cfg.Logger,
+		serverDomain:        serverDomain,
+		tunnelDomain:        tunnelDomain,
+		authToken:           cfg.AuthToken,
+		metricsToken:        cfg.MetricsToken,
+		maxRequestBodyBytes: cfg.MaxRequestBodyBytes,
 		wsUpgrader: websocket.Upgrader{
 			ReadBufferSize:  256 * 1024,
 			WriteBufferSize: 256 * 1024,
 			CheckOrigin: func(r *http.Request) bool {
-				return true // Allow all origins for tunnel connections
+				origin := r.Header.Get("Origin")
+				if origin == "" {
+					return true // Non-browser clients may not send Origin
+				}
+				originURL, err := url.Parse(origin)
+				if err != nil {
+					return false
+				}
+				originHost := originURL.Host
+				if originHost == "" {
+					originHost = originURL.Path
+				}
+				// Allow requests from server domain or tunnel domain
+				if originHost == serverDomain || originHost == tunnelDomain {
+					return true
+				}
+				// Allow subdomains of tunnel domain
+				if tunnelDomain != "" && strings.HasSuffix(originHost, "."+tunnelDomain) {
+					return true
+				}
+				return false
 			},
 		},
 	}
@@ -104,28 +138,12 @@ func (h *Handler) SetAllowedTunnelTypes(types []string) {
 
 // IsTransportAllowed checks if a transport is allowed
 func (h *Handler) IsTransportAllowed(transport string) bool {
-	if len(h.allowedTransports) == 0 {
-		return true
-	}
-	for _, t := range h.allowedTransports {
-		if strings.EqualFold(t, transport) {
-			return true
-		}
-	}
-	return false
+	return utils.ContainsIgnoreCase(h.allowedTransports, transport)
 }
 
 // IsTunnelTypeAllowed checks if a tunnel type is allowed
 func (h *Handler) IsTunnelTypeAllowed(tunnelType string) bool {
-	if len(h.allowedTunnelTypes) == 0 {
-		return true
-	}
-	for _, t := range h.allowedTunnelTypes {
-		if strings.EqualFold(t, tunnelType) {
-			return true
-		}
-	}
-	return false
+	return utils.ContainsIgnoreCase(h.allowedTunnelTypes, tunnelType)
 }
 
 // GetPreferredTransport returns the preferred transport for auto-detection
@@ -237,6 +255,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.maxRequestBodyBytes > 0 && r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, h.maxRequestBodyBytes)
+	}
+
 	stream, err := h.openStreamWithTimeout(tconn)
 	if err != nil {
 		httputil.SetCloseConnection(w)
@@ -260,12 +282,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		tconn.AddBytesIn,
 	)
 
-	if err := r.Write(countingStream); err != nil {
+	// Use pooled bufio.Writer to batch small writes and reduce syscalls
+	bw := bufioWriterPool.Get().(*bufio.Writer)
+	bw.Reset(countingStream)
+	if err := r.Write(bw); err != nil {
+		bufioWriterPool.Put(bw)
 		httputil.SetCloseConnection(w)
 		_ = r.Body.Close()
 		http.Error(w, "Forward failed", http.StatusBadGateway)
 		return
 	}
+	if err := bw.Flush(); err != nil {
+		bufioWriterPool.Put(bw)
+		httputil.SetCloseConnection(w)
+		_ = r.Body.Close()
+		http.Error(w, "Forward flush failed", http.StatusBadGateway)
+		return
+	}
+	bufioWriterPool.Put(bw)
 
 	reader := bufioReaderPool.Get().(*bufio.Reader)
 	reader.Reset(countingStream)
@@ -277,7 +311,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		bufioReaderPool.Put(reader)
 	}()
 
@@ -310,44 +344,43 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	buf := pool.GetBuffer(pool.SizeLarge)
 	defer pool.PutBuffer(buf)
 
-	// Copy with context cancellation support
-	ctx := r.Context()
-	copyDone := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			stream.Close()
-		case <-copyDone:
-		}
-	}()
-
+	// Copy with context cancellation support using AfterFunc (avoids per-request goroutine)
+	stop := context.AfterFunc(r.Context(), func() { _ = stream.Close() })
 	_, _ = io.CopyBuffer(w, resp.Body, (*buf)[:])
-	close(copyDone)
+	stop()
+}
+
+type streamResult struct {
+	stream net.Conn
+	err    error
 }
 
 func (h *Handler) openStreamWithTimeout(tconn *tunnel.Connection) (net.Conn, error) {
-	type result struct {
-		stream net.Conn
-		err    error
-	}
-	ch := make(chan result, 1)
+	return h.openStream(tconn, openStreamTimeout)
+}
+
+func (h *Handler) openStream(tconn *tunnel.Connection, timeout time.Duration) (net.Conn, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch := make(chan streamResult)
 
 	go func() {
 		s, err := tconn.OpenStream()
-		ch <- result{s, err}
+		select {
+		case ch <- streamResult{s, err}:
+		case <-ctx.Done():
+			if s != nil {
+				_ = s.Close()
+			}
+		}
 	}()
 
 	select {
 	case r := <-ch:
 		return r.stream, r.err
-	case <-time.After(openStreamTimeout):
-		// Goroutine will eventually complete and send to buffered channel
-		// which will be garbage collected. If stream was opened, it needs cleanup.
-		go func() {
-			if r := <-ch; r.stream != nil {
-				r.stream.Close()
-			}
-		}()
+	case <-time.After(timeout):
+		cancel()
 		return nil, fmt.Errorf("open stream timeout")
 	}
 }

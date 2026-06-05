@@ -56,8 +56,9 @@ func init() {
 	tcpCmd.Flags().StringSliceVar(&denyIPs, "deny-ip", nil, "Deny these IPs or CIDR ranges (e.g., 1.2.3.4,192.168.1.0/24)")
 	tcpCmd.Flags().StringVar(&transport, "transport", "auto", "Transport protocol: auto, tcp, wss (WebSocket over TLS)")
 	tcpCmd.Flags().StringVar(&bandwidth, "bandwidth", "", "Bandwidth limit (e.g., 1M, 500K, 1G)")
+	tcpCmd.Flags().BoolVar(&skipLocalTLSVerify, "skip-local-tls-verify", false, "Ignored for TCP tunnels; kept for daemon argument compatibility")
 	tcpCmd.Flags().BoolVar(&daemonMarker, "daemon-child", false, "Internal flag for daemon child process")
-	tcpCmd.Flags().MarkHidden("daemon-child")
+	_ = tcpCmd.Flags().MarkHidden("daemon-child")
 	rootCmd.AddCommand(tcpCmd)
 }
 
@@ -82,17 +83,18 @@ func runTCP(_ *cobra.Command, args []string) error {
 	}
 
 	connConfig := &tcp.ConnectorConfig{
-		ServerAddr: serverAddr,
-		Token:      token,
-		TunnelType: protocol.TunnelTypeTCP,
-		LocalHost:  localAddress,
-		LocalPort:  port,
-		Subdomain:  subdomain,
-		Insecure:   insecure,
-		AllowIPs:   allowIPs,
-		DenyIPs:    denyIPs,
-		Transport:  parseTransport(transport),
-		Bandwidth:  bw,
+		ServerAddr:         serverAddr,
+		Token:              token,
+		TunnelType:         protocol.TunnelTypeTCP,
+		LocalHost:          localAddress,
+		LocalPort:          port,
+		Subdomain:          subdomain,
+		Insecure:           insecure,
+		AllowIPs:           allowIPs,
+		DenyIPs:            denyIPs,
+		Transport:          parseTransport(transport),
+		Bandwidth:          bw,
+		SkipLocalTLSVerify: skipLocalTLSVerify,
 	}
 
 	var daemon *DaemonInfo

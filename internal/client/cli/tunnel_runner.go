@@ -168,7 +168,7 @@ func runTunnelWithUI(connConfig *tcp.ConnectorConfig, daemonInfo *DaemonInfo) er
 			// Close with timeout (wait for ongoing requests to complete)
 			done := make(chan struct{})
 			go func() {
-				connector.Close()
+				_ = connector.Close()
 				close(done)
 			}()
 
@@ -180,7 +180,7 @@ func runTunnelWithUI(connConfig *tcp.ConnectorConfig, daemonInfo *DaemonInfo) er
 			}
 
 			if daemonInfo != nil {
-				RemoveDaemonInfo(daemonInfo.Type, daemonInfo.Port)
+				_ = RemoveDaemonInfo(daemonInfo.Type, daemonInfo.Port)
 			}
 			fmt.Println(ui.Success("Tunnel closed"))
 			return nil

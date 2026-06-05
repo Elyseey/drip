@@ -130,7 +130,7 @@ func NewManagerWithConfig(logger *zap.Logger, cfg ManagerConfig) *Manager {
 // getShard returns the shard for a given subdomain using FNV-1a hash
 func (m *Manager) getShard(subdomain string) *shard {
 	h := fnv.New32a()
-	h.Write([]byte(subdomain))
+	_, _ = h.Write([]byte(subdomain))
 	return &m.shards[h.Sum32()%numShards]
 }
 
@@ -163,6 +163,22 @@ func (m *Manager) RegisterWithIP(conn *websocket.Conn, customSubdomain string, r
 		m.tunnelCount.Add(-1)
 	}
 
+	rollbackPerIP := func() {
+		if remoteIP != "" {
+			m.ipMu.Lock()
+			if m.tunnelsByIP[remoteIP] > 0 {
+				m.tunnelsByIP[remoteIP]--
+				if m.tunnelsByIP[remoteIP] == 0 {
+					delete(m.tunnelsByIP, remoteIP)
+					metrics.TunnelsByIP.DeleteLabelValues(remoteIP)
+				} else {
+					metrics.TunnelsByIP.WithLabelValues(remoteIP).Set(float64(m.tunnelsByIP[remoteIP]))
+				}
+			}
+			m.ipMu.Unlock()
+		}
+	}
+
 	// Check per-IP limits and reserve slot atomically
 	if remoteIP != "" {
 		// Check rate limit first (has its own lock)
@@ -190,23 +206,6 @@ func (m *Manager) RegisterWithIP(conn *websocket.Conn, customSubdomain string, r
 		m.tunnelsByIP[remoteIP]++
 		metrics.TunnelsByIP.WithLabelValues(remoteIP).Set(float64(m.tunnelsByIP[remoteIP]))
 		m.ipMu.Unlock()
-	}
-
-	// Rollback helper for per-IP counter
-	rollbackPerIP := func() {
-		if remoteIP != "" {
-			m.ipMu.Lock()
-			if m.tunnelsByIP[remoteIP] > 0 {
-				m.tunnelsByIP[remoteIP]--
-				if m.tunnelsByIP[remoteIP] == 0 {
-					delete(m.tunnelsByIP, remoteIP)
-					metrics.TunnelsByIP.DeleteLabelValues(remoteIP)
-				} else {
-					metrics.TunnelsByIP.WithLabelValues(remoteIP).Set(float64(m.tunnelsByIP[remoteIP]))
-				}
-			}
-			m.ipMu.Unlock()
-		}
 	}
 
 	var subdomain string
@@ -315,10 +314,16 @@ func (m *Manager) Unregister(subdomain string) {
 	}
 
 	remoteIP := tc.remoteIP
+	tunnelType := tc.GetTunnelType().String()
 	tc.Close()
 	delete(s.tunnels, subdomain)
 	delete(s.used, subdomain)
 	s.mu.Unlock()
+
+	// Clean up per-tunnel Prometheus labels to prevent cardinality explosion
+	metrics.TunnelBytesReceived.DeleteLabelValues(subdomain, subdomain, tunnelType)
+	metrics.TunnelBytesSent.DeleteLabelValues(subdomain, subdomain, tunnelType)
+	metrics.TunnelActiveConnections.DeleteLabelValues(subdomain, subdomain, tunnelType)
 
 	// Update counters
 	m.tunnelCount.Add(-1)
@@ -380,10 +385,11 @@ func (m *Manager) Count() int {
 func (m *Manager) CleanupStale(timeout time.Duration) int {
 	totalCleaned := 0
 
-	// Clean up each shard independently
+	// Collect stale subdomains under read lock, then unregister outside lock
+	// to avoid lock ordering issues (shard.mu -> ipMu vs RegisterWithIP's ipMu -> shard.mu)
 	for i := 0; i < numShards; i++ {
 		s := &m.shards[i]
-		s.mu.Lock()
+		s.mu.RLock()
 
 		var staleSubdomains []string
 		for subdomain, tc := range s.tunnels {
@@ -391,33 +397,13 @@ func (m *Manager) CleanupStale(timeout time.Duration) int {
 				staleSubdomains = append(staleSubdomains, subdomain)
 			}
 		}
+		s.mu.RUnlock()
 
+		// Unregister outside shard lock — Unregister handles its own locking safely
 		for _, subdomain := range staleSubdomains {
-			if tc, ok := s.tunnels[subdomain]; ok {
-				remoteIP := tc.remoteIP
-				tc.Close()
-				delete(s.tunnels, subdomain)
-				delete(s.used, subdomain)
-
-				// Update counters
-				m.tunnelCount.Add(-1)
-				if remoteIP != "" {
-					m.ipMu.Lock()
-					if m.tunnelsByIP[remoteIP] > 0 {
-						m.tunnelsByIP[remoteIP]--
-						if m.tunnelsByIP[remoteIP] == 0 {
-							delete(m.tunnelsByIP, remoteIP)
-							metrics.TunnelsByIP.DeleteLabelValues(remoteIP)
-						} else {
-							metrics.TunnelsByIP.WithLabelValues(remoteIP).Set(float64(m.tunnelsByIP[remoteIP]))
-						}
-					}
-					m.ipMu.Unlock()
-				}
-			}
+			m.Unregister(subdomain)
 		}
 		totalCleaned += len(staleSubdomains)
-		s.mu.Unlock()
 	}
 
 	// Cleanup expired rate limit entries

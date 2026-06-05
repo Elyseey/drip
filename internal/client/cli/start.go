@@ -191,10 +191,8 @@ func startMultipleTunnels(cfg *config.ClientConfig, tunnels []*config.TunnelConf
 			fmt.Printf("  ✓ %s: %s\n", tunnel.Name, client.GetURL())
 
 			// Run until stopped
-			select {
-			case <-stopChan:
-				client.Close()
-			}
+			<-stopChan
+			_ = client.Close()
 		}(t)
 	}
 
@@ -248,19 +246,20 @@ func buildConnectorConfig(cfg *config.ClientConfig, t *config.TunnelConfig) (*tc
 	}
 
 	return &tcp.ConnectorConfig{
-		ServerAddr: cfg.Server,
-		Token:      cfg.Token,
-		TunnelType: tunnelType,
-		LocalHost:  getAddress(t),
-		LocalPort:  t.Port,
-		Subdomain:  t.Subdomain,
-		Insecure:   insecure,
-		AllowIPs:   t.AllowIPs,
-		DenyIPs:    t.DenyIPs,
-		AuthPass:   t.Auth,
-		AuthBearer: t.AuthBearer,
-		Transport:  transport,
-		Bandwidth:  bw,
+		ServerAddr:         cfg.Server,
+		Token:              cfg.Token,
+		TunnelType:         tunnelType,
+		LocalHost:          getAddress(t),
+		LocalPort:          t.Port,
+		Subdomain:          t.Subdomain,
+		Insecure:           insecure,
+		AllowIPs:           t.AllowIPs,
+		DenyIPs:            t.DenyIPs,
+		AuthPass:           t.Auth,
+		AuthBearer:         t.AuthBearer,
+		Transport:          transport,
+		Bandwidth:          bw,
+		SkipLocalTLSVerify: t.SkipLocalTLSVerify,
 	}, nil
 }
 

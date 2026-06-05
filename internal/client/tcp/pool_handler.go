@@ -6,8 +6,10 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"drip/internal/shared/httputil"
@@ -17,6 +19,8 @@ import (
 
 	"go.uber.org/zap"
 )
+
+const externalForwardedProto = "https"
 
 func (c *PoolClient) handleStream(h *sessionHandle, stream net.Conn) {
 	defer c.wg.Done()
@@ -90,7 +94,8 @@ func (c *PoolClient) handleHTTPStream(stream net.Conn) {
 		scheme = "https"
 	}
 
-	targetURL := fmt.Sprintf("%s://%s:%d%s", scheme, c.localHost, c.localPort, req.URL.RequestURI())
+	targetAddr := net.JoinHostPort(c.localHost, fmt.Sprintf("%d", c.localPort))
+	targetURL := fmt.Sprintf("%s://%s%s", scheme, targetAddr, req.URL.RequestURI())
 	outReq, err := http.NewRequestWithContext(ctx, req.Method, targetURL, req.Body)
 	if err != nil {
 		httputil.WriteProxyError(cc, http.StatusBadGateway, "Bad Gateway")
@@ -106,14 +111,14 @@ func (c *PoolClient) handleHTTPStream(stream net.Conn) {
 
 	targetHost := c.localHost
 	if c.localPort != 80 && c.localPort != 443 {
-		targetHost = fmt.Sprintf("%s:%d", c.localHost, c.localPort)
+		targetHost = targetAddr
 	}
 	outReq.Host = targetHost
 	outReq.Header.Set("Host", targetHost)
 	if origHost != "" {
 		outReq.Header.Set("X-Forwarded-Host", origHost)
 	}
-	outReq.Header.Set("X-Forwarded-Proto", "https")
+	outReq.Header.Set("X-Forwarded-Proto", externalForwardedProto)
 
 	resp, err := c.httpClient.Do(outReq)
 	if err != nil {
@@ -127,14 +132,8 @@ func (c *PoolClient) handleHTTPStream(stream net.Conn) {
 		return
 	}
 
-	copyDone := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			stream.Close()
-		case <-copyDone:
-		}
-	}()
+	stopCopy := context.AfterFunc(ctx, func() { _ = stream.Close() })
+	defer stopCopy()
 
 	buf := make([]byte, 32*1024)
 	for {
@@ -150,7 +149,6 @@ func (c *PoolClient) handleHTTPStream(stream net.Conn) {
 			break
 		}
 	}
-	close(copyDone)
 }
 
 func (c *PoolClient) handleWebSocketUpgrade(cc net.Conn, req *http.Request) {
@@ -163,7 +161,12 @@ func (c *PoolClient) handleWebSocketUpgrade(cc net.Conn, req *http.Request) {
 	defer localConn.Close()
 
 	if c.tunnelType == protocol.TunnelTypeHTTPS {
-		tlsConn := tls.Client(localConn, &tls.Config{InsecureSkipVerify: true})
+		tlsConfig := localBackendTLSConfig(c.localHost, c.skipLocalTLSVerify)
+		if c.skipLocalTLSVerify {
+			c.logger.Warn("TLS certificate verification is disabled for local HTTPS WebSocket backend. " +
+				"Connections to the local service are vulnerable to man-in-the-middle attacks.")
+		}
+		tlsConn := tls.Client(localConn, tlsConfig)
 		if err := tlsConn.Handshake(); err != nil {
 			httputil.WriteProxyError(cc, http.StatusBadGateway, "TLS handshake failed")
 			return
@@ -176,6 +179,7 @@ func (c *PoolClient) handleWebSocketUpgrade(cc net.Conn, req *http.Request) {
 	if origHost != "" {
 		req.Header.Set("X-Forwarded-Host", origHost)
 	}
+	req.Header.Set("X-Forwarded-Proto", externalForwardedProto)
 	if err := req.Write(localConn); err != nil {
 		httputil.WriteProxyError(cc, http.StatusBadGateway, "Failed to forward upgrade request")
 		return
@@ -217,10 +221,18 @@ func (c *bufferedConn) Read(p []byte) (int, error) {
 	return c.reader.Read(p)
 }
 
-func newLocalHTTPClient(tunnelType protocol.TunnelType) *http.Client {
+var localHTTPClientWarnOnce sync.Once
+
+func newLocalHTTPClient(tunnelType protocol.TunnelType, skipTLSVerify bool) *http.Client {
 	var tlsConfig *tls.Config
 	if tunnelType == protocol.TunnelTypeHTTPS {
-		tlsConfig = &tls.Config{InsecureSkipVerify: true}
+		if skipTLSVerify {
+			localHTTPClientWarnOnce.Do(func() {
+				log.Println("[SECURITY WARNING] TLS certificate verification is disabled for local HTTPS backend. " +
+					"Connections to the local service are vulnerable to man-in-the-middle attacks.")
+			})
+		}
+		tlsConfig = localBackendTLSConfig("", skipTLSVerify)
 	}
 	return &http.Client{
 		Transport: &http.Transport{
@@ -244,6 +256,16 @@ func newLocalHTTPClient(tunnelType protocol.TunnelType) *http.Client {
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
+	}
+}
+
+func localBackendTLSConfig(serverName string, skipVerify bool) *tls.Config {
+	if skipVerify {
+		return &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- only for loopback backends or explicit local TLS opt-out.
+	}
+	return &tls.Config{
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS12,
 	}
 }
 

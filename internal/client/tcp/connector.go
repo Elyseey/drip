@@ -49,6 +49,9 @@ type ConnectorConfig struct {
 
 	// Bandwidth limit (bytes/sec), 0 = unlimited
 	Bandwidth int64
+
+	// SkipLocalTLSVerify disables certificate verification for local HTTPS backends.
+	SkipLocalTLSVerify bool
 }
 
 type TunnelClient interface {

@@ -3,9 +3,11 @@ package config
 import (
 	"crypto/tls"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -45,6 +47,10 @@ type ServerConfig struct {
 	// Bandwidth limiting
 	Bandwidth       string  `yaml:"bandwidth,omitempty"`
 	BurstMultiplier float64 `yaml:"burst_multiplier,omitempty"`
+
+	// Optional HTTP request body limit for tunneled HTTP/HTTPS traffic.
+	// 0 disables the limit and preserves full reverse-proxy behavior.
+	MaxRequestBodyBytes int64 `yaml:"max_request_body_bytes,omitempty"`
 }
 
 // Validate checks if the server configuration is valid
@@ -93,6 +99,10 @@ func (c *ServerConfig) Validate() error {
 		}
 	}
 
+	if c.MaxRequestBodyBytes < 0 {
+		return fmt.Errorf("max_request_body_bytes must be >= 0")
+	}
+
 	return nil
 }
 
@@ -122,9 +132,10 @@ func (c *ServerConfig) LoadTLSConfig() (*tls.Config, error) {
 	// Force TLS 1.3 only
 	tlsConfig := &tls.Config{
 		Certificates:             []tls.Certificate{cert},
-		MinVersion:               tls.VersionTLS13, // Only TLS 1.3
-		MaxVersion:               tls.VersionTLS13, // Only TLS 1.3
-		PreferServerCipherSuites: true,             // Prefer server cipher suites (ignored in TLS 1.3 but set for consistency)
+		MinVersion:               tls.VersionTLS13,                  // Only TLS 1.3
+		MaxVersion:               tls.VersionTLS13,                  // Only TLS 1.3
+		PreferServerCipherSuites: true,                              // Prefer server cipher suites (ignored in TLS 1.3 but set for consistency)
+		ClientSessionCache:       tls.NewLRUClientSessionCache(128), // Enable session resumption
 		CipherSuites: []uint16{
 			tls.TLS_AES_128_GCM_SHA256,
 			tls.TLS_AES_256_GCM_SHA384,
@@ -151,11 +162,18 @@ func GetClientTLSConfig(serverName string) *tls.Config {
 	}
 }
 
+var insecureTLSWarnOnce sync.Once
+
 // GetClientTLSConfigInsecure returns TLS config for client with InsecureSkipVerify
-// WARNING: Only use for testing!
+// WARNING: Only use for testing! This disables TLS certificate verification.
 func GetClientTLSConfigInsecure() *tls.Config {
+	insecureTLSWarnOnce.Do(func() {
+		log.Println("[SECURITY WARNING] TLS certificate verification is disabled (InsecureSkipVerify=true). " +
+			"This makes connections vulnerable to man-in-the-middle attacks. " +
+			"Only use this for testing or with trusted endpoints.")
+	})
 	return &tls.Config{
-		InsecureSkipVerify:       true,
+		InsecureSkipVerify:       true, // #nosec G402 -- explicit --insecure/test-only mode; behavior intentionally preserved.
 		MinVersion:               tls.VersionTLS13,
 		MaxVersion:               tls.VersionTLS13,
 		ClientSessionCache:       tls.NewLRUClientSessionCache(0),
@@ -190,7 +208,9 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 		path = DefaultServerConfigPath()
 	}
 
-	data, err := os.ReadFile(path)
+	cleanPath := filepath.Clean(path)
+
+	data, err := os.ReadFile(cleanPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("config file not found at %s", path)
@@ -207,12 +227,15 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 }
 
 // SaveServerConfig saves server configuration to file
+// #nosec G117 -- Tokens are intentionally saved to config files with 0600 permissions
 func SaveServerConfig(config *ServerConfig, path string) error {
 	if path == "" {
 		path = DefaultServerConfigPath()
 	}
 
-	dir := filepath.Dir(path)
+	cleanPath := filepath.Clean(path)
+
+	dir := filepath.Dir(cleanPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
@@ -222,7 +245,7 @@ func SaveServerConfig(config *ServerConfig, path string) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := os.WriteFile(cleanPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 

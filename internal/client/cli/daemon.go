@@ -5,12 +5,63 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"drip/internal/shared/ui"
 	"drip/pkg/config"
 	json "github.com/goccy/go-json"
 )
+
+func isSupportedTunnelType(tunnelType string) bool {
+	switch tunnelType {
+	case "http", "https", "tcp":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateDaemonTarget(tunnelType string, port int) error {
+	if !isSupportedTunnelType(tunnelType) {
+		return fmt.Errorf("invalid tunnel type: %s", tunnelType)
+	}
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("invalid port: %d", port)
+	}
+	return nil
+}
+
+func getDaemonFilePath(tunnelType string, port int) (string, error) {
+	if err := validateDaemonTarget(tunnelType, port); err != nil {
+		return "", err
+	}
+	return filepath.Join(getDaemonDir(), fmt.Sprintf("%s_%d.json", tunnelType, port)), nil
+}
+
+func getDaemonLogPath(tunnelType string, port int) (string, error) {
+	if err := validateDaemonTarget(tunnelType, port); err != nil {
+		return "", err
+	}
+	return filepath.Join(getDaemonDir(), fmt.Sprintf("%s_%d.log", tunnelType, port)), nil
+}
+
+func isDaemonFlag(arg string) bool {
+	return arg == "-d" || arg == "-D" || arg == "--daemon" ||
+		strings.HasPrefix(arg, "--daemon=") || strings.HasPrefix(arg, "-d=")
+}
+
+func sanitizeDaemonArgs(args []string) []string {
+	cleanArgs := make([]string, 0, len(args))
+	for _, arg := range args {
+		// Remove daemon flags to avoid recursive respawn, but preserve --daemon-child.
+		if isDaemonFlag(arg) {
+			continue
+		}
+		cleanArgs = append(cleanArgs, arg)
+	}
+	return cleanArgs
+}
 
 // DaemonInfo stores information about a running daemon process
 type DaemonInfo struct {
@@ -33,11 +84,6 @@ func getDaemonDir() string {
 	return filepath.Join(home, ".drip", "daemons")
 }
 
-// getDaemonFilePath returns the path to a daemon info file
-func getDaemonFilePath(tunnelType string, port int) string {
-	return filepath.Join(getDaemonDir(), fmt.Sprintf("%s_%d.json", tunnelType, port))
-}
-
 // SaveDaemonInfo saves daemon information to a file
 func SaveDaemonInfo(info *DaemonInfo) error {
 	dir := getDaemonDir()
@@ -50,7 +96,10 @@ func SaveDaemonInfo(info *DaemonInfo) error {
 		return fmt.Errorf("failed to marshal daemon info: %w", err)
 	}
 
-	path := getDaemonFilePath(info.Type, info.Port)
+	path, err := getDaemonFilePath(info.Type, info.Port)
+	if err != nil {
+		return err
+	}
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("failed to write daemon info: %w", err)
 	}
@@ -60,8 +109,11 @@ func SaveDaemonInfo(info *DaemonInfo) error {
 
 // LoadDaemonInfo loads daemon information from a file
 func LoadDaemonInfo(tunnelType string, port int) (*DaemonInfo, error) {
-	path := getDaemonFilePath(tunnelType, port)
-	data, err := os.ReadFile(path)
+	path, err := getDaemonFilePath(tunnelType, port)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path) // #nosec G304 -- path is generated within controlled directory
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -79,7 +131,10 @@ func LoadDaemonInfo(tunnelType string, port int) (*DaemonInfo, error) {
 
 // RemoveDaemonInfo removes a daemon info file
 func RemoveDaemonInfo(tunnelType string, port int) error {
-	path := getDaemonFilePath(tunnelType, port)
+	path, err := getDaemonFilePath(tunnelType, port)
+	if err != nil {
+		return err
+	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove daemon info: %w", err)
 	}
@@ -103,13 +158,24 @@ func ListAllDaemons() ([]*DaemonInfo, error) {
 			continue
 		}
 
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		// Prevent path traversal: ensure the resolved path is within the daemon directory
+		path := filepath.Join(dir, entry.Name())
+		cleanPath := filepath.Clean(path)
+		cleanDir := filepath.Clean(dir)
+		if !strings.HasPrefix(cleanPath, cleanDir+string(filepath.Separator)) && cleanPath != cleanDir {
+			continue
+		}
+
+		data, err := os.ReadFile(path) // #nosec G304 -- path traversal is checked above
 		if err != nil {
 			continue
 		}
 
 		var info DaemonInfo
 		if err := json.Unmarshal(data, &info); err != nil {
+			continue
+		}
+		if err := validateDaemonTarget(info.Type, info.Port); err != nil {
 			continue
 		}
 
@@ -145,27 +211,19 @@ func KillProcess(pid int) error {
 
 // StartDaemon starts the current process as a daemon
 func StartDaemon(tunnelType string, port int, args []string) error {
+	if err := validateDaemonTarget(tunnelType, port); err != nil {
+		return err
+	}
+
 	// Get the executable path
 	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	// Build command arguments (remove -D/--daemon flag to prevent recursion)
-	var cleanArgs []string
-	for _, arg := range args {
-		// Skip -D or --daemon flags (but NOT --daemon-child)
-		if arg == "-D" || arg == "--daemon" {
-			continue
-		}
-		// Handle -d (short form) - skip it
-		if arg == "-d" {
-			continue
-		}
-		cleanArgs = append(cleanArgs, arg)
-	}
+	cleanArgs := sanitizeDaemonArgs(args)
 
-	cmd := exec.Command(executable, cleanArgs...)
+	cmd := exec.Command(executable, cleanArgs...) // #nosec G204 -- exec.Command does not invoke a shell; executable and daemon target are validated separately
 
 	setupDaemonCmd(cmd)
 
@@ -173,15 +231,18 @@ func StartDaemon(tunnelType string, port int, args []string) error {
 	if err := os.MkdirAll(logDir, 0700); err != nil {
 		return fmt.Errorf("failed to create daemon directory: %w", err)
 	}
-	logPath := filepath.Join(logDir, fmt.Sprintf("%s_%d.log", tunnelType, port))
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	logPath, err := getDaemonLogPath(tunnelType, port)
+	if err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600) // #nosec G304 -- tunnelType is validated, path is within controlled directory
 	if err != nil {
 		return fmt.Errorf("failed to create log file: %w", err)
 	}
 
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDONLY, 0)
 	if err != nil {
-		logFile.Close()
+		_ = logFile.Close()
 		return fmt.Errorf("failed to open /dev/null: %w", err)
 	}
 	cmd.Stdin = devNull
@@ -189,8 +250,8 @@ func StartDaemon(tunnelType string, port int, args []string) error {
 	cmd.Stderr = logFile
 
 	if err := cmd.Start(); err != nil {
-		logFile.Close()
-		devNull.Close()
+		_ = logFile.Close()
+		_ = devNull.Close()
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
@@ -264,7 +325,7 @@ func CleanupStaleDaemons() error {
 
 	for _, info := range daemons {
 		if !IsProcessRunning(info.PID) {
-			RemoveDaemonInfo(info.Type, info.Port)
+			_ = RemoveDaemonInfo(info.Type, info.Port)
 		}
 	}
 

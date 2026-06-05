@@ -3,6 +3,7 @@ package tcp
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"sync"
 	"time"
 
@@ -42,7 +43,9 @@ func NewConnectionGroupManager(logger *zap.Logger) *ConnectionGroupManager {
 // GenerateTunnelID generates a unique tunnel ID
 func GenerateTunnelID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+	}
 	return hex.EncodeToString(b)
 }
 

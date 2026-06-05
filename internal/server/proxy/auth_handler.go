@@ -18,6 +18,7 @@ import (
 
 const authCookieName = "drip_auth"
 const authSessionDuration = 24 * time.Hour
+const maxAuthSessions = 10000
 
 const (
 	authRateLimitWindow           = 1 * time.Minute
@@ -34,6 +35,7 @@ type authSession struct {
 type authSessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*authSession
+	stopCh   chan struct{}
 }
 
 type authRateLimitEntry struct {
@@ -45,14 +47,17 @@ type authRateLimitEntry struct {
 type authRateLimiter struct {
 	mu      sync.RWMutex
 	entries map[string]*authRateLimitEntry
-}
-
-var sessionStore = &authSessionStore{
-	sessions: make(map[string]*authSession),
+	stopCh  chan struct{}
 }
 
 var authLimiter = &authRateLimiter{
 	entries: make(map[string]*authRateLimitEntry),
+	stopCh:  make(chan struct{}),
+}
+
+var sessionStore = &authSessionStore{
+	sessions: make(map[string]*authSession),
+	stopCh:   make(chan struct{}),
 }
 
 func init() {
@@ -64,8 +69,13 @@ func (rl *authRateLimiter) startCleanupLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		rl.cleanup()
+	for {
+		select {
+		case <-ticker.C:
+			rl.cleanup()
+		case <-rl.stopCh:
+			return
+		}
 	}
 }
 
@@ -73,8 +83,13 @@ func (s *authSessionStore) startCleanupLoop() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		s.cleanup()
+	for {
+		select {
+		case <-ticker.C:
+			s.cleanup()
+		case <-s.stopCh:
+			return
+		}
 	}
 }
 
@@ -82,7 +97,10 @@ func (s *authSessionStore) cleanup() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := time.Now()
+	s.cleanupExpiredLocked(time.Now())
+}
+
+func (s *authSessionStore) cleanupExpiredLocked(now time.Time) {
 	for token, session := range s.sessions {
 		if now.After(session.expiresAt) {
 			delete(s.sessions, token)
@@ -97,19 +115,23 @@ func (rl *authRateLimiter) isRateLimited(ip string) bool {
 
 	rl.mu.RLock()
 	entry, exists := rl.entries[ip]
-	rl.mu.RUnlock()
-
 	if !exists {
+		rl.mu.RUnlock()
 		return false
 	}
+	// Copy fields under lock to avoid data race with recordFailure
+	failures := entry.failures
+	windowStart := entry.windowStart
+	lockedUntil := entry.lockedUntil
+	rl.mu.RUnlock()
 
 	now := time.Now()
 
-	if !entry.lockedUntil.IsZero() && now.Before(entry.lockedUntil) {
+	if !lockedUntil.IsZero() && now.Before(lockedUntil) {
 		return true
 	}
 
-	if now.Sub(entry.windowStart) < authRateLimitWindow && entry.failures >= authRateLimitMax {
+	if now.Sub(windowStart) < authRateLimitWindow && failures >= authRateLimitMax {
 		return true
 	}
 
@@ -174,36 +196,70 @@ func (rl *authRateLimiter) cleanup() {
 }
 
 func (s *authSessionStore) create(subdomain string) string {
+	now := time.Now()
 	token := generateSessionToken()
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cleanupExpiredLocked(now)
+
+	// Enforce session limit to prevent unbounded memory growth
+	if len(s.sessions) >= maxAuthSessions {
+		var oldestToken string
+		var oldestExpiry time.Time
+		found := false
+		for t, sess := range s.sessions {
+			if !found || sess.expiresAt.Before(oldestExpiry) {
+				oldestToken = t
+				oldestExpiry = sess.expiresAt
+				found = true
+			}
+		}
+		if !found {
+			return ""
+		}
+		delete(s.sessions, oldestToken)
+	}
+
 	s.sessions[token] = &authSession{
 		subdomain: subdomain,
-		expiresAt: time.Now().Add(authSessionDuration),
+		expiresAt: now.Add(authSessionDuration),
 	}
-	s.mu.Unlock()
 	return token
 }
 
 func (s *authSessionStore) validate(token, subdomain string) bool {
+	// Fast path: read lock for the common case
 	s.mu.RLock()
 	session, ok := s.sessions[token]
-	s.mu.RUnlock()
-
 	if !ok {
+		s.mu.RUnlock()
 		return false
 	}
-	if time.Now().After(session.expiresAt) {
+	expiresAt := session.expiresAt
+	sd := session.subdomain
+	s.mu.RUnlock()
+
+	if time.Now().After(expiresAt) {
+		// Slow path: write lock to delete expired session
 		s.mu.Lock()
-		delete(s.sessions, token)
+		// Re-check under write lock (another goroutine may have deleted it)
+		if sess, stillExists := s.sessions[token]; stillExists && time.Now().After(sess.expiresAt) {
+			delete(s.sessions, token)
+		}
 		s.mu.Unlock()
 		return false
 	}
-	return session.subdomain == subdomain
+	return sd == subdomain
 }
 
 func generateSessionToken() string {
 	b := make([]byte, 32)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// This should never happen in practice, but if it does,
+		// we cannot generate a secure token
+		panic(fmt.Sprintf("failed to generate random session token: %v", err))
+	}
 	hash := sha256.Sum256(b)
 	return hex.EncodeToString(hash[:])
 }
@@ -257,10 +313,6 @@ func (h *Handler) serveBearerAuthRequired(w http.ResponseWriter, realm string) {
 	http.Error(w, "Unauthorized: provide bearer token via Authorization header", http.StatusUnauthorized)
 }
 
-func (h *Handler) handleProxyLogin(w http.ResponseWriter, r *http.Request, tconn *tunnel.Connection, subdomain string) {
-	h.handleProxyLoginWithRateLimit(w, r, tconn, subdomain, "")
-}
-
 func (h *Handler) handleProxyLoginWithRateLimit(w http.ResponseWriter, r *http.Request, tconn *tunnel.Connection, subdomain string, clientIP string) {
 	if r.Method != http.MethodPost {
 		h.serveLoginPage(w, r, subdomain, "")
@@ -293,6 +345,10 @@ func (h *Handler) handleProxyLoginWithRateLimit(w http.ResponseWriter, r *http.R
 	}
 
 	token := sessionStore.create(subdomain)
+	if token == "" {
+		http.Error(w, "Too many sessions, try again later", http.StatusServiceUnavailable)
+		return
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     authCookieName + "_" + subdomain,
 		Value:    token,
@@ -304,7 +360,7 @@ func (h *Handler) handleProxyLoginWithRateLimit(w http.ResponseWriter, r *http.R
 	})
 
 	redirectURL := r.FormValue("redirect")
-	if redirectURL == "" || redirectURL == "/_drip/login" {
+	if redirectURL == "" || redirectURL == "/_drip/login" || !strings.HasPrefix(redirectURL, "/") || strings.HasPrefix(redirectURL, "//") {
 		redirectURL = "/"
 	}
 	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
@@ -315,7 +371,7 @@ func (h *Handler) serveLoginPage(w http.ResponseWriter, r *http.Request, subdoma
 	if r.URL.RawQuery != "" {
 		redirectURL += "?" + r.URL.RawQuery
 	}
-	if redirectURL == "/_drip/login" {
+	if redirectURL == "/_drip/login" || !strings.HasPrefix(redirectURL, "/") || strings.HasPrefix(redirectURL, "//") {
 		redirectURL = "/"
 	}
 
@@ -325,6 +381,7 @@ func (h *Handler) serveLoginPage(w http.ResponseWriter, r *http.Request, subdoma
 	}
 
 	safeRedirectURL := html.EscapeString(redirectURL)
+	safeSubdomain := html.EscapeString(subdomain)
 
 	htmlContent := fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
@@ -403,10 +460,10 @@ func (h *Handler) serveLoginPage(w http.ResponseWriter, r *http.Request, subdoma
 		</footer>
 	</div>
 </body>
-</html>`, subdomain, subdomain, errorHTML, safeRedirectURL)
+</html>`, safeSubdomain, safeSubdomain, errorHTML, safeRedirectURL)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	w.WriteHeader(http.StatusUnauthorized)
-	w.Write([]byte(htmlContent))
+	_, _ = w.Write([]byte(htmlContent))
 }

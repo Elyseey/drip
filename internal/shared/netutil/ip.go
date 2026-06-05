@@ -60,16 +60,26 @@ func ExtractClientIP(r *http.Request) string {
 	if IsPrivateIP(remoteIP) {
 		// Check X-Forwarded-For header (may contain multiple IPs)
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			// Take the first IP (original client)
-			if idx := strings.Index(xff, ","); idx != -1 {
-				return strings.TrimSpace(xff[:idx])
+			// Walk from left to right, preserving the original public client IP.
+			// Trusted edge proxies should sanitize any inbound X-Forwarded-For value.
+			parts := strings.Split(xff, ",")
+			for _, part := range parts {
+				ip := strings.TrimSpace(part)
+				if ip != "" && net.ParseIP(ip) != nil {
+					if !IsPrivateIP(ip) {
+						return ip
+					}
+				}
 			}
-			return strings.TrimSpace(xff)
+			// If all IPs are private (unusual), fall through to X-Real-IP
 		}
 
 		// Check X-Real-IP header
 		if xri := r.Header.Get("X-Real-IP"); xri != "" {
-			return strings.TrimSpace(xri)
+			ip := strings.TrimSpace(xri)
+			if net.ParseIP(ip) != nil {
+				return ip
+			}
 		}
 	}
 

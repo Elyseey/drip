@@ -12,17 +12,18 @@ import (
 
 // TunnelConfig holds configuration for a predefined tunnel
 type TunnelConfig struct {
-	Name       string   `yaml:"name"`                  // Tunnel name (required, unique identifier)
-	Type       string   `yaml:"type"`                  // Tunnel type: http, https, tcp (required)
-	Port       int      `yaml:"port"`                  // Local port to forward (required)
-	Address    string   `yaml:"address,omitempty"`     // Local address (default: 127.0.0.1)
-	Subdomain  string   `yaml:"subdomain,omitempty"`   // Custom subdomain
-	Transport  string   `yaml:"transport,omitempty"`   // Transport: auto, tcp, wss
-	AllowIPs   []string `yaml:"allow_ips,omitempty"`   // Allowed IPs/CIDRs
-	DenyIPs    []string `yaml:"deny_ips,omitempty"`    // Denied IPs/CIDRs
-	Auth       string   `yaml:"auth,omitempty"`        // Proxy authentication password (http/https only)
-	AuthBearer string   `yaml:"auth_bearer,omitempty"` // Proxy authentication bearer token (http/https only)
-	Bandwidth  string   `yaml:"bandwidth,omitempty"`   // Bandwidth limit (e.g., 1M, 500K, 1G)
+	Name               string   `yaml:"name"`                            // Tunnel name (required, unique identifier)
+	Type               string   `yaml:"type"`                            // Tunnel type: http, https, tcp (required)
+	Port               int      `yaml:"port"`                            // Local port to forward (required)
+	Address            string   `yaml:"address,omitempty"`               // Local address (default: 127.0.0.1)
+	Subdomain          string   `yaml:"subdomain,omitempty"`             // Custom subdomain
+	Transport          string   `yaml:"transport,omitempty"`             // Transport: auto, tcp, wss
+	AllowIPs           []string `yaml:"allow_ips,omitempty"`             // Allowed IPs/CIDRs
+	DenyIPs            []string `yaml:"deny_ips,omitempty"`              // Denied IPs/CIDRs
+	Auth               string   `yaml:"auth,omitempty"`                  // Proxy authentication password (http/https only)
+	AuthBearer         string   `yaml:"auth_bearer,omitempty"`           // Proxy authentication bearer token (http/https only)
+	Bandwidth          string   `yaml:"bandwidth,omitempty"`             // Bandwidth limit (e.g., 1M, 500K, 1G)
+	SkipLocalTLSVerify bool     `yaml:"skip_local_tls_verify,omitempty"` // Skip TLS verification for HTTPS backends
 }
 
 // Validate checks if the tunnel configuration is valid
@@ -131,7 +132,9 @@ func LoadClientConfig(path string) (*ClientConfig, error) {
 		path = DefaultClientConfigPath()
 	}
 
-	data, err := os.ReadFile(path)
+	cleanPath := filepath.Clean(path)
+
+	data, err := os.ReadFile(cleanPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("config file not found at %s, please run 'drip config init' first", path)
@@ -152,12 +155,15 @@ func LoadClientConfig(path string) (*ClientConfig, error) {
 }
 
 // SaveClientConfig saves configuration to file
+// #nosec G117 -- Token is intentionally saved to config files with 0600 permissions
 func SaveClientConfig(config *ClientConfig, path string) error {
 	if path == "" {
 		path = DefaultClientConfigPath()
 	}
 
-	dir := filepath.Dir(path)
+	cleanPath := filepath.Clean(path)
+
+	dir := filepath.Dir(cleanPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
@@ -168,7 +174,7 @@ func SaveClientConfig(config *ClientConfig, path string) error {
 	}
 
 	// Write to file with secure permissions
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := os.WriteFile(cleanPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 

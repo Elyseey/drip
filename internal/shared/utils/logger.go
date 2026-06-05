@@ -99,6 +99,6 @@ func Fatal(msg string, fields ...zap.Field) {
 // Sync flushes any buffered log entries
 func Sync() {
 	if logger != nil {
-		logger.Sync()
+		_ = logger.Sync()
 	}
 }

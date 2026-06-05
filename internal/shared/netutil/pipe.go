@@ -130,12 +130,16 @@ func pipeBuffer(dst io.ReadWriteCloser, src io.ReadWriteCloser, bufSize int, onC
 	return err
 }
 
+const stopCheckInterval = 64
+
 func copyBuffer(dst io.Writer, src io.Reader, buf []byte, onCopied func(n int64), stopCh <-chan struct{}) (written int64, err error) {
-	for {
-		select {
-		case <-stopCh:
-			return written, io.EOF
-		default:
+	for i := 0; ; i++ {
+		if i%stopCheckInterval == 0 {
+			select {
+			case <-stopCh:
+				return written, io.EOF
+			default:
+			}
 		}
 
 		nr, er := src.Read(buf)

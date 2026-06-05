@@ -47,3 +47,17 @@ func (a *AllowedList) Items() []string {
 func (a *AllowedList) IsEmpty() bool {
 	return len(a.items) == 0
 }
+
+// ContainsIgnoreCase returns true if the allowed slice is empty (allow-all)
+// or contains value with case-insensitive matching.
+func ContainsIgnoreCase(allowed []string, value string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, item := range allowed {
+		if strings.EqualFold(item, value) {
+			return true
+		}
+	}
+	return false
+}

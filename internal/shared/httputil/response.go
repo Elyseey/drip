@@ -9,14 +9,14 @@ import (
 func WriteJSON(w http.ResponseWriter, data []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
-	w.Write(data)
+	_, _ = w.Write(data)
 }
 
 // WriteHTML writes an HTML response with the appropriate headers.
 func WriteHTML(w http.ResponseWriter, data []byte) {
 	w.Header().Set("Content-Type", "text/html")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
-	w.Write(data)
+	_, _ = w.Write(data)
 }
 
 // WriteHTMLWithStatus writes an HTML response with a custom status code.
@@ -24,7 +24,7 @@ func WriteHTMLWithStatus(w http.ResponseWriter, data []byte, statusCode int) {
 	w.Header().Set("Content-Type", "text/html")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 	w.WriteHeader(statusCode)
-	w.Write(data)
+	_, _ = w.Write(data)
 }
 
 // SetContentLength sets the Content-Length header.

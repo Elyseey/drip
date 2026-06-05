@@ -56,8 +56,9 @@ func init() {
 	httpsCmd.Flags().StringVar(&authBearer, "auth-bearer", "", "Bearer token for proxy authentication")
 	httpsCmd.Flags().StringVar(&transport, "transport", "auto", "Transport protocol: auto, tcp, wss (WebSocket over TLS)")
 	httpsCmd.Flags().StringVar(&bandwidth, "bandwidth", "", "Bandwidth limit (e.g., 1M, 500K, 1G)")
+	httpsCmd.Flags().BoolVar(&skipLocalTLSVerify, "skip-local-tls-verify", false, "Skip TLS verification for local HTTPS backends")
 	httpsCmd.Flags().BoolVar(&daemonMarker, "daemon-child", false, "Internal flag for daemon child process")
-	httpsCmd.Flags().MarkHidden("daemon-child")
+	_ = httpsCmd.Flags().MarkHidden("daemon-child")
 	rootCmd.AddCommand(httpsCmd)
 }
 
@@ -86,19 +87,20 @@ func runHTTPS(_ *cobra.Command, args []string) error {
 	}
 
 	connConfig := &tcp.ConnectorConfig{
-		ServerAddr: serverAddr,
-		Token:      token,
-		TunnelType: protocol.TunnelTypeHTTPS,
-		LocalHost:  localAddress,
-		LocalPort:  port,
-		Subdomain:  subdomain,
-		Insecure:   insecure,
-		AllowIPs:   allowIPs,
-		DenyIPs:    denyIPs,
-		AuthPass:   authPass,
-		AuthBearer: authBearer,
-		Transport:  parseTransport(transport),
-		Bandwidth:  bw,
+		ServerAddr:         serverAddr,
+		Token:              token,
+		TunnelType:         protocol.TunnelTypeHTTPS,
+		LocalHost:          localAddress,
+		LocalPort:          port,
+		Subdomain:          subdomain,
+		Insecure:           insecure,
+		AllowIPs:           allowIPs,
+		DenyIPs:            denyIPs,
+		AuthPass:           authPass,
+		AuthBearer:         authBearer,
+		Transport:          parseTransport(transport),
+		Bandwidth:          bw,
+		SkipLocalTLSVerify: skipLocalTLSVerify,
 	}
 
 	var daemon *DaemonInfo

@@ -4,7 +4,15 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync"
 )
+
+var limitedConnBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 32*1024)
+		return &b
+	},
+}
 
 type LimitedConn struct {
 	net.Conn
@@ -68,7 +76,9 @@ func (c *LimitedConn) Write(b []byte) (n int, err error) {
 }
 
 func (c *LimitedConn) ReadFrom(r io.Reader) (n int64, err error) {
-	buf := make([]byte, 32*1024)
+	bufPtr := limitedConnBufPool.Get().(*[]byte)
+	buf := *bufPtr
+	defer limitedConnBufPool.Put(bufPtr)
 	for {
 		nr, er := r.Read(buf)
 		if nr > 0 {
@@ -90,7 +100,9 @@ func (c *LimitedConn) ReadFrom(r io.Reader) (n int64, err error) {
 }
 
 func (c *LimitedConn) WriteTo(w io.Writer) (n int64, err error) {
-	buf := make([]byte, 32*1024)
+	bufPtr := limitedConnBufPool.Get().(*[]byte)
+	buf := *bufPtr
+	defer limitedConnBufPool.Put(bufPtr)
 	for {
 		nr, er := c.Read(buf)
 		if nr > 0 {

@@ -14,8 +14,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// bufioWriterPool reuses bufio.Writer instances to reduce GC pressure
-var bufioWriterPool = sync.Pool{
+// httpRespWriterPool reuses bufio.Writer instances for raw HTTP response writing
+var httpRespWriterPool = sync.Pool{
 	New: func() interface{} {
 		return bufio.NewWriterSize(nil, 4096)
 	},
@@ -62,7 +62,9 @@ func (h *HTTPRequestHandler) Handle() error {
 		return h.handleLegacy()
 	}
 
-	h.conn.SetReadDeadline(time.Time{})
+	if err := h.conn.SetReadDeadline(time.Time{}); err != nil {
+		h.logger.Warn("Failed to clear read deadline", zap.Error(err))
+	}
 
 	wrappedConn := &bufferedConn{
 		Conn:   h.conn,
@@ -77,7 +79,7 @@ func (h *HTTPRequestHandler) Handle() error {
 			"Connection: close\r\n" +
 			"\r\n" +
 			"Server busy, please retry later\r\n"
-		h.conn.Write([]byte(response))
+		_, _ = h.conn.Write([]byte(response))
 		return fmt.Errorf("http listener queue full")
 	}
 
@@ -97,14 +99,18 @@ func (h *HTTPRequestHandler) handleLegacy() error {
 			"Content-Length: 47\r\n" +
 			"\r\n" +
 			"HTTP handler not configured for this TCP port\r\n"
-		h.conn.Write([]byte(response))
+		_, _ = h.conn.Write([]byte(response))
 		return fmt.Errorf("HTTP handler not configured")
 	}
 
-	h.conn.SetReadDeadline(time.Time{})
+	if err := h.conn.SetReadDeadline(time.Time{}); err != nil {
+		h.logger.Warn("Failed to clear read deadline", zap.Error(err))
+	}
 
 	for {
-		h.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		if err := h.conn.SetReadDeadline(time.Now().Add(60 * time.Second)); err != nil {
+			h.logger.Warn("Failed to set read deadline", zap.Error(err))
+		}
 
 		req, err := http.ReadRequest(h.reader)
 		if err != nil {
@@ -139,13 +145,13 @@ func (h *HTTPRequestHandler) handleLegacy() error {
 		}
 
 		if h.ctx != nil {
-			if ctxWithContext, ok := h.ctx.(interface{ Done() <-chan struct{} }); ok {
-				req = req.WithContext(ctxWithContext.(interface {
-					Done() <-chan struct{}
-					Deadline() (deadline time.Time, ok bool)
-					Err() error
-					Value(key interface{}) interface{}
-				}))
+			if ctx, ok := h.ctx.(interface {
+				Done() <-chan struct{}
+				Deadline() (deadline time.Time, ok bool)
+				Err() error
+				Value(key interface{}) interface{}
+			}); ok {
+				req = req.WithContext(ctx)
 			}
 		}
 
@@ -156,7 +162,7 @@ func (h *HTTPRequestHandler) handleLegacy() error {
 		)
 
 		// Get writer from pool to reduce GC pressure
-		pooledWriter := bufioWriterPool.Get().(*bufio.Writer)
+		pooledWriter := httpRespWriterPool.Get().(*bufio.Writer)
 		pooledWriter.Reset(h.conn)
 
 		respWriter := &httpResponseWriter{
@@ -173,7 +179,7 @@ func (h *HTTPRequestHandler) handleLegacy() error {
 
 		// Return writer to pool
 		pooledWriter.Reset(nil) // Clear reference to connection
-		bufioWriterPool.Put(pooledWriter)
+		httpRespWriterPool.Put(pooledWriter)
 
 		h.logger.Debug("HTTP request processing completed",
 			zap.String("method", req.Method),
@@ -225,22 +231,25 @@ func (w *httpResponseWriter) WriteHeader(statusCode int) {
 		statusText = "Unknown"
 	}
 
-	w.writer.WriteString("HTTP/1.1 ")
-	w.writer.WriteString(fmt.Sprintf("%d", statusCode))
-	w.writer.WriteByte(' ')
-	w.writer.WriteString(statusText)
-	w.writer.WriteString("\r\n")
+	_, _ = w.writer.WriteString("HTTP/1.1 ")
+	_, _ = w.writer.WriteString(fmt.Sprintf("%d", statusCode))
+	_ = w.writer.WriteByte(' ')
+	_, _ = w.writer.WriteString(statusText)
+	_, _ = w.writer.WriteString("\r\n")
 
 	for key, values := range w.header {
 		for _, value := range values {
-			w.writer.WriteString(key)
-			w.writer.WriteString(": ")
-			w.writer.WriteString(value)
-			w.writer.WriteString("\r\n")
+			if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(value, "\r\n") {
+				continue
+			}
+			_, _ = w.writer.WriteString(key)
+			_, _ = w.writer.WriteString(": ")
+			_, _ = w.writer.WriteString(value)
+			_, _ = w.writer.WriteString("\r\n")
 		}
 	}
 
-	w.writer.WriteString("\r\n")
+	_, _ = w.writer.WriteString("\r\n")
 }
 
 func (w *httpResponseWriter) Write(data []byte) (int, error) {
@@ -249,3 +258,15 @@ func (w *httpResponseWriter) Write(data []byte) (int, error) {
 	}
 	return w.writer.Write(data)
 }
+
+// Flush implements http.Flusher to prevent panics from handlers that
+// type-assert the ResponseWriter.
+func (w *httpResponseWriter) Flush() {
+	if !w.headerWritten {
+		w.WriteHeader(http.StatusOK)
+	}
+	_ = w.writer.Flush()
+}
+
+// Ensure httpResponseWriter implements http.Flusher at compile time.
+var _ http.Flusher = (*httpResponseWriter)(nil)

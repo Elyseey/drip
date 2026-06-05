@@ -2,6 +2,7 @@ package tcp
 
 import (
 	"bufio"
+	"crypto/subtle"
 	"fmt"
 	"net"
 	"time"
@@ -73,7 +74,7 @@ func (h *DataConnectionHandler) Handle(frame *protocol.Frame) error {
 		return fmt.Errorf("group manager not available")
 	}
 
-	if h.authToken != "" && req.Token != h.authToken {
+	if h.authToken != "" && subtle.ConstantTimeCompare([]byte(req.Token), []byte(h.authToken)) != 1 {
 		h.sendError("authentication_failed", "Invalid authentication token")
 		return fmt.Errorf("authentication failed for data connection")
 	}
@@ -84,7 +85,7 @@ func (h *DataConnectionHandler) Handle(frame *protocol.Frame) error {
 		return fmt.Errorf("tunnel not found: %s", req.TunnelID)
 	}
 
-	if group.Token != "" && req.Token != group.Token {
+	if group.Token != "" && subtle.ConstantTimeCompare([]byte(req.Token), []byte(group.Token)) != 1 {
 		h.sendError("authentication_failed", "Invalid authentication token")
 		return fmt.Errorf("authentication failed for data connection")
 	}

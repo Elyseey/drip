@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"crypto/subtle"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -14,17 +15,18 @@ import (
 )
 
 type Connection struct {
-	Subdomain  string
-	Conn       *websocket.Conn
-	SendCh     chan []byte
-	CloseCh    chan struct{}
-	LastActive time.Time
-	mu         sync.RWMutex
-	logger     *zap.Logger
-	closed     atomic.Bool
-	tunnelType protocol.TunnelType
-	openStream func() (net.Conn, error)
-	remoteIP   string
+	Subdomain     string
+	Conn          *websocket.Conn
+	SendCh        chan []byte
+	CloseCh       chan struct{}
+	LastActive    time.Time
+	mu            sync.RWMutex
+	logger        *zap.Logger
+	closed        atomic.Bool
+	tunnelType    protocol.TunnelType
+	tunnelTypeStr string // cached string for metrics, set once
+	openStream    func() (net.Conn, error)
+	remoteIP      string
 
 	bytesIn           atomic.Int64
 	bytesOut          atomic.Int64
@@ -54,10 +56,13 @@ func (c *Connection) Send(data []byte) error {
 		return ErrConnectionClosed
 	}
 
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
 	select {
 	case c.SendCh <- data:
 		return nil
-	case <-time.After(5 * time.Second):
+	case <-timer.C:
 		return ErrSendTimeout
 	}
 }
@@ -86,9 +91,9 @@ func (c *Connection) Close() {
 	close(c.SendCh)
 
 	if c.Conn != nil {
-		c.Conn.WriteMessage(websocket.CloseMessage,
+		_ = c.Conn.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		c.Conn.Close()
+		_ = c.Conn.Close()
 	}
 
 	c.logger.Info("Connection closed", zap.String("subdomain", c.Subdomain))
@@ -101,6 +106,7 @@ func (c *Connection) IsClosed() bool {
 func (c *Connection) SetTunnelType(tType protocol.TunnelType) {
 	c.mu.Lock()
 	c.tunnelType = tType
+	c.tunnelTypeStr = tType.String()
 	c.mu.Unlock()
 }
 
@@ -137,7 +143,7 @@ func (c *Connection) AddBytesIn(n int64) {
 	}
 	c.bytesIn.Add(n)
 	metrics.BytesReceived.Add(float64(n))
-	metrics.TunnelBytesReceived.WithLabelValues(c.Subdomain, c.Subdomain, c.GetTunnelType().String()).Add(float64(n))
+	metrics.TunnelBytesReceived.WithLabelValues(c.Subdomain, c.Subdomain, c.tunnelTypeStr).Add(float64(n))
 }
 
 func (c *Connection) AddBytesOut(n int64) {
@@ -146,7 +152,7 @@ func (c *Connection) AddBytesOut(n int64) {
 	}
 	c.bytesOut.Add(n)
 	metrics.BytesSent.Add(float64(n))
-	metrics.TunnelBytesSent.WithLabelValues(c.Subdomain, c.Subdomain, c.GetTunnelType().String()).Add(float64(n))
+	metrics.TunnelBytesSent.WithLabelValues(c.Subdomain, c.Subdomain, c.tunnelTypeStr).Add(float64(n))
 }
 
 func (c *Connection) GetBytesIn() int64  { return c.bytesIn.Load() }
@@ -154,14 +160,14 @@ func (c *Connection) GetBytesOut() int64 { return c.bytesOut.Load() }
 
 func (c *Connection) IncActiveConnections() {
 	c.activeConnections.Add(1)
-	metrics.TunnelActiveConnections.WithLabelValues(c.Subdomain, c.Subdomain, c.GetTunnelType().String()).Inc()
+	metrics.TunnelActiveConnections.WithLabelValues(c.Subdomain, c.Subdomain, c.tunnelTypeStr).Inc()
 }
 
 func (c *Connection) DecActiveConnections() {
 	if v := c.activeConnections.Add(-1); v < 0 {
 		c.activeConnections.Store(0)
 	}
-	metrics.TunnelActiveConnections.WithLabelValues(c.Subdomain, c.Subdomain, c.GetTunnelType().String()).Dec()
+	metrics.TunnelActiveConnections.WithLabelValues(c.Subdomain, c.Subdomain, c.tunnelTypeStr).Dec()
 }
 
 func (c *Connection) GetActiveConnections() int64 { return c.activeConnections.Load() }
@@ -215,7 +221,7 @@ func (c *Connection) ValidateProxyAuth(password string) bool {
 	if auth == nil || !auth.Enabled {
 		return true
 	}
-	return auth.Password == password
+	return subtle.ConstantTimeCompare([]byte(auth.Password), []byte(password)) == 1
 }
 
 func (c *Connection) SetBandwidthWithBurst(bandwidth int64, burstMultiplier float64) {
@@ -270,14 +276,20 @@ func (c *Connection) StartWritePump() {
 				return
 			}
 
-			c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+				c.logger.Error("SetWriteDeadline failed", zap.String("subdomain", c.Subdomain), zap.Error(err))
+				return
+			}
 			if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				c.logger.Error("Write error", zap.String("subdomain", c.Subdomain), zap.Error(err))
 				return
 			}
 
 		case <-ticker.C:
-			c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+				c.logger.Error("SetWriteDeadline failed", zap.String("subdomain", c.Subdomain), zap.Error(err))
+				return
+			}
 			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
