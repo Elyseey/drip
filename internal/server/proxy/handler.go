@@ -332,7 +332,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if resp.ContentLength >= 0 {
+	streamingResponse := httputil.IsEventStream(resp.Header)
+	if streamingResponse {
+		w.Header().Del("Content-Length")
+	} else if resp.ContentLength >= 0 {
 		httputil.SetContentLength(w, resp.ContentLength)
 	} else {
 		w.Header().Del("Content-Length")
@@ -340,14 +343,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(statusCode)
 
+	// Copy with context cancellation support using AfterFunc (avoids per-request goroutine)
+	stop := context.AfterFunc(r.Context(), func() { _ = stream.Close() })
+	defer stop()
+
+	if streamingResponse {
+		flushResponse(w)
+		_, _ = copyResponseBodyFlushing(w, resp.Body)
+		return
+	}
+
 	// Use pooled buffer for zero-copy optimization
 	buf := pool.GetBuffer(pool.SizeLarge)
 	defer pool.PutBuffer(buf)
 
-	// Copy with context cancellation support using AfterFunc (avoids per-request goroutine)
-	stop := context.AfterFunc(r.Context(), func() { _ = stream.Close() })
 	_, _ = io.CopyBuffer(w, resp.Body, (*buf)[:])
-	stop()
 }
 
 type streamResult struct {
