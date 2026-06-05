@@ -30,8 +30,20 @@ func buildDaemonArgs(tunnelType string, args []string, subdomain string, localAd
 	if authBearer != "" {
 		daemonArgs = append(daemonArgs, "--auth-bearer", authBearer)
 	}
+	for _, ip := range allowIPs {
+		daemonArgs = append(daemonArgs, "--allow-ip", ip)
+	}
+	for _, ip := range denyIPs {
+		daemonArgs = append(daemonArgs, "--deny-ip", ip)
+	}
+	if transport != "" && transport != "auto" {
+		daemonArgs = append(daemonArgs, "--transport", transport)
+	}
 	if bandwidth != "" {
 		daemonArgs = append(daemonArgs, "--bandwidth", bandwidth)
+	}
+	if skipLocalTLSVerify {
+		daemonArgs = append(daemonArgs, "--skip-local-tls-verify")
 	}
 	if insecure {
 		daemonArgs = append(daemonArgs, "--insecure")

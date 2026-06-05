@@ -15,18 +15,18 @@ import (
 )
 
 type Connection struct {
-	Subdomain  string
-	Conn       *websocket.Conn
-	SendCh     chan []byte
-	CloseCh    chan struct{}
-	LastActive time.Time
-	mu         sync.RWMutex
-	logger     *zap.Logger
-	closed     atomic.Bool
+	Subdomain     string
+	Conn          *websocket.Conn
+	SendCh        chan []byte
+	CloseCh       chan struct{}
+	LastActive    time.Time
+	mu            sync.RWMutex
+	logger        *zap.Logger
+	closed        atomic.Bool
 	tunnelType    protocol.TunnelType
 	tunnelTypeStr string // cached string for metrics, set once
-	openStream func() (net.Conn, error)
-	remoteIP   string
+	openStream    func() (net.Conn, error)
+	remoteIP      string
 
 	bytesIn           atomic.Int64
 	bytesOut          atomic.Int64

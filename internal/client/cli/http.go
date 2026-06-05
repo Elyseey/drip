@@ -12,16 +12,17 @@ import (
 )
 
 var (
-	subdomain    string
-	daemonMode   bool
-	daemonMarker bool
-	localAddress string
-	allowIPs     []string
-	denyIPs      []string
-	authPass     string
-	authBearer   string
-	transport    string
-	bandwidth    string
+	subdomain          string
+	daemonMode         bool
+	daemonMarker       bool
+	localAddress       string
+	allowIPs           []string
+	denyIPs            []string
+	authPass           string
+	authBearer         string
+	transport          string
+	bandwidth          string
+	skipLocalTLSVerify bool
 )
 
 var httpCmd = &cobra.Command{
@@ -70,6 +71,7 @@ func init() {
 	httpCmd.Flags().StringVar(&authBearer, "auth-bearer", "", "Bearer token for proxy authentication")
 	httpCmd.Flags().StringVar(&transport, "transport", "auto", "Transport protocol: auto, tcp, wss (WebSocket over TLS)")
 	httpCmd.Flags().StringVar(&bandwidth, "bandwidth", "", "Bandwidth limit (e.g., 1M, 500K, 1G)")
+	httpCmd.Flags().BoolVar(&skipLocalTLSVerify, "skip-local-tls-verify", false, "Skip TLS verification for local HTTPS backends")
 	httpCmd.Flags().BoolVar(&daemonMarker, "daemon-child", false, "Internal flag for daemon child process")
 	_ = httpCmd.Flags().MarkHidden("daemon-child")
 	rootCmd.AddCommand(httpCmd)
@@ -100,19 +102,20 @@ func runHTTP(_ *cobra.Command, args []string) error {
 	}
 
 	connConfig := &tcp.ConnectorConfig{
-		ServerAddr: serverAddr,
-		Token:      token,
-		TunnelType: protocol.TunnelTypeHTTP,
-		LocalHost:  localAddress,
-		LocalPort:  port,
-		Subdomain:  subdomain,
-		Insecure:   insecure,
-		AllowIPs:   allowIPs,
-		DenyIPs:    denyIPs,
-		AuthPass:   authPass,
-		AuthBearer: authBearer,
-		Transport:  parseTransport(transport),
-		Bandwidth:  bw,
+		ServerAddr:         serverAddr,
+		Token:              token,
+		TunnelType:         protocol.TunnelTypeHTTP,
+		LocalHost:          localAddress,
+		LocalPort:          port,
+		Subdomain:          subdomain,
+		Insecure:           insecure,
+		AllowIPs:           allowIPs,
+		DenyIPs:            denyIPs,
+		AuthPass:           authPass,
+		AuthBearer:         authBearer,
+		Transport:          parseTransport(transport),
+		Bandwidth:          bw,
+		SkipLocalTLSVerify: skipLocalTLSVerify,
 	}
 
 	var daemon *DaemonInfo

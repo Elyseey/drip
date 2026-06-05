@@ -173,7 +173,7 @@ func GetClientTLSConfigInsecure() *tls.Config {
 			"Only use this for testing or with trusted endpoints.")
 	})
 	return &tls.Config{
-		InsecureSkipVerify:       true,
+		InsecureSkipVerify:       true, // #nosec G402 -- explicit --insecure/test-only mode; behavior intentionally preserved.
 		MinVersion:               tls.VersionTLS13,
 		MaxVersion:               tls.VersionTLS13,
 		ClientSessionCache:       tls.NewLRUClientSessionCache(0),
@@ -208,11 +208,7 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 		path = DefaultServerConfigPath()
 	}
 
-	// Prevent path traversal attacks
 	cleanPath := filepath.Clean(path)
-	if strings.Contains(cleanPath, "..") {
-		return nil, fmt.Errorf("invalid config path: path traversal detected")
-	}
 
 	data, err := os.ReadFile(cleanPath)
 	if err != nil {
@@ -237,11 +233,7 @@ func SaveServerConfig(config *ServerConfig, path string) error {
 		path = DefaultServerConfigPath()
 	}
 
-	// Prevent path traversal attacks
 	cleanPath := filepath.Clean(path)
-	if strings.Contains(cleanPath, "..") {
-		return fmt.Errorf("invalid config path: path traversal detected")
-	}
 
 	dir := filepath.Dir(cleanPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {

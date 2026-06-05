@@ -84,6 +84,9 @@ type PoolClient struct {
 
 	// Bandwidth limit requested from server (bytes/sec), 0 = unlimited
 	bandwidth int64
+
+	// TLS verification behavior for local HTTPS backends
+	skipLocalTLSVerify bool
 }
 
 // NewPoolClient creates a new pool client.
@@ -157,39 +160,51 @@ func NewPoolClient(cfg *ConnectorConfig, logger *zap.Logger) *PoolClient {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	c := &PoolClient{
-		serverAddr:      serverAddr,
-		tlsConfig:       tlsConfig,
-		token:           cfg.Token,
-		tunnelType:      tunnelType,
-		localHost:       localHost,
-		localPort:       cfg.LocalPort,
-		subdomain:       cfg.Subdomain,
-		minSessions:     minSessions,
-		maxSessions:     maxSessions,
-		initialSessions: initialSessions,
-		stats:           stats.NewTrafficStats(),
-		ctx:             ctx,
-		cancel:          cancel,
-		stopCh:          make(chan struct{}),
-		doneCh:          make(chan struct{}),
-		dataSessions:    make(map[string]*sessionHandle),
-		logger:          logger,
-		allowIPs:        cfg.AllowIPs,
-		denyIPs:         cfg.DenyIPs,
-		authPass:        cfg.AuthPass,
-		authBearer:      cfg.AuthBearer,
-		transport:       transport,
-		insecure:        cfg.Insecure,
-		dialer:          NewConnectionDialer(serverAddr, tlsConfig, cfg.Token, transport, logger),
-		bandwidth:       cfg.Bandwidth,
+		serverAddr:         serverAddr,
+		tlsConfig:          tlsConfig,
+		token:              cfg.Token,
+		tunnelType:         tunnelType,
+		localHost:          localHost,
+		localPort:          cfg.LocalPort,
+		subdomain:          cfg.Subdomain,
+		minSessions:        minSessions,
+		maxSessions:        maxSessions,
+		initialSessions:    initialSessions,
+		stats:              stats.NewTrafficStats(),
+		ctx:                ctx,
+		cancel:             cancel,
+		stopCh:             make(chan struct{}),
+		doneCh:             make(chan struct{}),
+		dataSessions:       make(map[string]*sessionHandle),
+		logger:             logger,
+		allowIPs:           cfg.AllowIPs,
+		denyIPs:            cfg.DenyIPs,
+		authPass:           cfg.AuthPass,
+		authBearer:         cfg.AuthBearer,
+		transport:          transport,
+		insecure:           cfg.Insecure,
+		dialer:             NewConnectionDialer(serverAddr, tlsConfig, cfg.Token, transport, logger),
+		bandwidth:          cfg.Bandwidth,
+		skipLocalTLSVerify: cfg.SkipLocalTLSVerify || isLoopbackHost(localHost),
 	}
 
 	if tunnelType == protocol.TunnelTypeHTTP || tunnelType == protocol.TunnelTypeHTTPS {
-		c.httpClient = newLocalHTTPClient(tunnelType)
+		c.httpClient = newLocalHTTPClient(tunnelType, c.skipLocalTLSVerify)
 	}
 
 	c.latencyCallback.Store(LatencyCallback(func(time.Duration) {}))
 	return c
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // Connect establishes the primary connection and starts background workers.

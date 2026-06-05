@@ -52,7 +52,7 @@ type Listener struct {
 	wg           sync.WaitGroup
 	connections  sync.Map // map[string]*Connection, sync.Map for better concurrent read performance
 	connCount    atomic.Int64
-	connIDSeq    atomic.Int64 // unique connection ID sequence
+	connIDSeq    atomic.Int64  // unique connection ID sequence
 	connSem      chan struct{} // semaphore to limit max connections
 	workerPool   *pool.WorkerPool
 	recoverer    *recovery.Recoverer
