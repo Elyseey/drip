@@ -63,6 +63,7 @@ type PoolClient struct {
 	dataSessions map[string]*sessionHandle
 	desiredTotal int
 	lastScale    time.Time
+	pendingSessions int
 
 	logger *zap.Logger
 
@@ -316,7 +317,9 @@ func (c *PoolClient) Connect() error {
 		session: session,
 	}
 	primary.touch()
+	c.mu.Lock()
 	c.primary = primary
+	c.mu.Unlock()
 
 	c.wg.Add(1)
 	go func() {

@@ -70,11 +70,15 @@ func (c *PoolClient) warmupSessions() {
 
 // addDataSession creates a new data session.
 func (c *PoolClient) addDataSession() error {
-	select {
-	case <-c.stopCh:
-		return net.ErrClosed
-	default:
+	if err := c.reserveSessionSlot(); err != nil {
+		return err
 	}
+	slotReserved := true
+	defer func() {
+		if slotReserved {
+			c.releaseSessionSlot()
+		}
+	}()
 
 	if c.tunnelID == "" {
 		return fmt.Errorf("server does not support data connections")
@@ -83,6 +87,10 @@ func (c *PoolClient) addDataSession() error {
 	conn, err := c.dialer.Dial()
 	if err != nil {
 		return err
+	}
+
+	if c.closedDuringHandshake(conn) {
+		return net.ErrClosed
 	}
 
 	connID := fmt.Sprintf("data-%d", dataConnCounter.Add(1))
@@ -112,6 +120,10 @@ func (c *PoolClient) addDataSession() error {
 	}
 	defer ack.Release()
 	_ = conn.SetReadDeadline(time.Time{})
+
+	if c.closedDuringHandshake(conn) {
+		return net.ErrClosed
+	}
 
 	if ack.Type == protocol.FrameTypeError {
 		var errMsg protocol.ErrorMessage
@@ -153,6 +165,14 @@ func (c *PoolClient) addDataSession() error {
 	h.touch()
 
 	c.mu.Lock()
+	if c.closed.Load() {
+		c.mu.Unlock()
+		_ = session.Close()
+		_ = conn.Close()
+		return net.ErrClosed
+	}
+	c.pendingSessions--
+	slotReserved = false
 	c.dataSessions[connID] = h
 	c.mu.Unlock()
 
@@ -166,6 +186,58 @@ func (c *PoolClient) addDataSession() error {
 	go c.pingLoop(h)
 
 	return nil
+}
+
+func (c *PoolClient) reserveSessionSlot() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed.Load() {
+		return net.ErrClosed
+	}
+
+	select {
+	case <-c.stopCh:
+		return net.ErrClosed
+	default:
+	}
+
+	if c.sessionCountLocked() >= c.maxSessions {
+		return fmt.Errorf("max sessions reached")
+	}
+
+	c.pendingSessions++
+	return nil
+}
+
+func (c *PoolClient) releaseSessionSlot() {
+	c.mu.Lock()
+	if c.pendingSessions > 0 {
+		c.pendingSessions--
+	}
+	c.mu.Unlock()
+}
+
+func (c *PoolClient) closedDuringHandshake(conn net.Conn) bool {
+	if c.closed.Load() {
+		_ = conn.Close()
+		return true
+	}
+	select {
+	case <-c.stopCh:
+		_ = conn.Close()
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *PoolClient) sessionCountLocked() int {
+	count := len(c.dataSessions) + c.pendingSessions
+	if c.primary != nil {
+		count++
+	}
+	return count
 }
 
 // removeIdleSessions removes n idle sessions.
@@ -250,11 +322,7 @@ func (c *PoolClient) removeDataSession(id string) bool {
 func (c *PoolClient) sessionCount() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	count := len(c.dataSessions)
-	if c.primary != nil {
-		count++
-	}
-	return count
+	return c.sessionCountLocked()
 }
 
 // SessionStats holds per-session statistics.

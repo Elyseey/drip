@@ -11,10 +11,11 @@ import (
 // PortAllocator manages dynamic TCP port allocation within a configured range.
 // It keeps an in-memory reservation map; ports are held until Release is called.
 type PortAllocator struct {
-	min  int
-	max  int
-	used map[int]bool
-	mu   sync.Mutex
+	min       int
+	max       int
+	used      map[int]bool
+	listeners map[int]net.Listener
+	mu        sync.Mutex
 }
 
 // NewPortAllocator creates a new allocator with the given inclusive range.
@@ -24,9 +25,10 @@ func NewPortAllocator(min, max int) (*PortAllocator, error) {
 	}
 
 	return &PortAllocator{
-		min:  min,
-		max:  max,
-		used: make(map[int]bool),
+		min:       min,
+		max:       max,
+		used:      make(map[int]bool),
+		listeners: make(map[int]net.Listener),
 	}, nil
 }
 
@@ -47,9 +49,9 @@ func (p *PortAllocator) Allocate() (int, error) {
 		if err != nil {
 			continue
 		}
-		_ = ln.Close()
 
 		p.used[port] = true
+		p.listeners[port] = ln
 		return port, nil
 	}
 
@@ -72,16 +74,34 @@ func (p *PortAllocator) AllocateSpecific(port int) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("requested port %d unavailable: %w", port, err)
 	}
-	_ = ln.Close()
 
 	p.used[port] = true
+	p.listeners[port] = ln
 	return port, nil
+}
+
+// TakeListener returns the held listener for a port and removes it from the allocator.
+func (p *PortAllocator) TakeListener(port int) (net.Listener, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	ln, ok := p.listeners[port]
+	if !ok {
+		return nil, false
+	}
+	delete(p.listeners, port)
+	return ln, true
 }
 
 // Release frees a previously allocated port.
 func (p *PortAllocator) Release(port int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if ln, ok := p.listeners[port]; ok {
+		_ = ln.Close()
+		delete(p.listeners, port)
+	}
 	delete(p.used, port)
 }
 

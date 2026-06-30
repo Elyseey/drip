@@ -433,6 +433,7 @@ func (c *Connection) Close() {
 
 		// If handed off, don't close the connection - HTTP handler owns it now
 		if handedOff {
+			protocol.UnregisterConnection()
 			c.logger.Debug("Connection handed off to HTTP handler, skipping close")
 			return
 		}

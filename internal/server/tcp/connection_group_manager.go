@@ -121,6 +121,10 @@ func (m *ConnectionGroupManager) cleanupStaleGroups() {
 
 	// Close groups without holding lock to avoid blocking other operations
 	for _, group := range staleGroups {
+		if group.PrimaryConn != nil {
+			group.PrimaryConn.Close()
+			continue
+		}
 		group.Close()
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 // getSysProcAttr returns platform-specific process attributes for daemonization
@@ -29,6 +30,20 @@ func killProcessOS(process *os.Process) error {
 		// If SIGTERM fails, try SIGKILL
 		return process.Signal(syscall.SIGKILL)
 	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !isProcessRunningOS(process) {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if err := process.Signal(syscall.SIGKILL); err != nil {
+		return err
+	}
+
+	time.Sleep(100 * time.Millisecond)
 	return nil
 }
 

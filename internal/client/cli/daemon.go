@@ -227,6 +227,10 @@ func StartDaemon(tunnelType string, port int, args []string) error {
 
 	setupDaemonCmd(cmd)
 
+	if token := resolveDaemonToken(cleanArgs); token != "" {
+		cmd.Env = append(os.Environ(), "DRIP_TOKEN="+token)
+	}
+
 	logDir := getDaemonDir()
 	if err := os.MkdirAll(logDir, 0700); err != nil {
 		return fmt.Errorf("failed to create daemon directory: %w", err)

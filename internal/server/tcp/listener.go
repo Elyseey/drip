@@ -311,6 +311,11 @@ func (l *Listener) handleConnection(netConn net.Conn) {
 		)
 	}
 
+	remoteIP := netutil.ExtractIP(remoteAddr)
+	if netutil.IsPrivateIP(remoteIP) {
+		remoteIP = ""
+	}
+
 	conn := NewConnection(ConnectionConfig{
 		Conn:         netConn,
 		AuthToken:    l.authToken,
@@ -323,6 +328,7 @@ func (l *Listener) handleConnection(netConn net.Conn) {
 		HTTPHandler:  l.httpHandler,
 		GroupManager: l.groupManager,
 		HTTPListener: l.httpListener,
+		RemoteIP:     remoteIP,
 	})
 	conn.SetAllowedTunnelTypes(l.allowedTunnelTypes)
 	conn.SetAllowedTransports(l.allowedTransports)

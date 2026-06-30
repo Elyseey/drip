@@ -63,6 +63,14 @@ var sessionHeapPool = sync.Pool{
 	},
 }
 
+func putSessionHeap(h *sessionHeap) {
+	if h == nil {
+		return
+	}
+	*h = (*h)[:0]
+	sessionHeapPool.Put(h)
+}
+
 type ConnectionGroup struct {
 	TunnelID     string
 	Subdomain    string
@@ -106,6 +114,7 @@ func (g *ConnectionGroup) heartbeatLoop(interval, timeout time.Duration) {
 
 	const maxConsecutiveFailures = 3
 	failureCount := make(map[string]int)
+	pingInFlight := make(map[string]bool)
 
 	type sessionSnapshot struct {
 		id      string
@@ -134,6 +143,11 @@ func (g *ConnectionGroup) heartbeatLoop(interval, timeout time.Duration) {
 				continue
 			}
 
+			if pingInFlight[snap.id] {
+				continue
+			}
+			pingInFlight[snap.id] = true
+
 			done := make(chan error, 1)
 			go func(s *yamux.Session) {
 				_, err := s.Ping()
@@ -146,8 +160,10 @@ func (g *ConnectionGroup) heartbeatLoop(interval, timeout time.Duration) {
 			case <-time.After(timeout):
 				err = fmt.Errorf("ping timeout")
 			case <-g.stopCh:
+				delete(pingInFlight, snap.id)
 				return
 			}
+			delete(pingInFlight, snap.id)
 
 			if err != nil {
 				failureCount[snap.id]++
@@ -158,12 +174,20 @@ func (g *ConnectionGroup) heartbeatLoop(interval, timeout time.Duration) {
 				)
 
 				if failureCount[snap.id] >= maxConsecutiveFailures {
-					g.logger.Warn("Session ping failed too many times, removing",
-						zap.String("session_id", snap.id),
-						zap.Int("failures", failureCount[snap.id]),
-					)
-					g.RemoveSession(snap.id)
-					delete(failureCount, snap.id)
+					if snap.id == "primary" {
+						g.logger.Warn("Primary session ping failed repeatedly, keeping session alive",
+							zap.String("session_id", snap.id),
+							zap.Int("failures", failureCount[snap.id]),
+						)
+						failureCount[snap.id] = 0
+					} else {
+						g.logger.Warn("Session ping failed too many times, removing",
+							zap.String("session_id", snap.id),
+							zap.Int("failures", failureCount[snap.id]),
+						)
+						g.RemoveSession(snap.id)
+						delete(failureCount, snap.id)
+					}
 				}
 			} else {
 				failureCount[snap.id] = 0
@@ -283,9 +307,11 @@ func (g *ConnectionGroup) OpenStream() (net.Conn, error) {
 
 		h := g.buildSessionHeap(false)
 		if h.Len() == 0 {
+			putSessionHeap(h)
 			h = g.buildSessionHeap(true)
 		}
 		if h.Len() == 0 {
+			putSessionHeap(h)
 			return nil, net.ErrClosed
 		}
 
@@ -306,8 +332,7 @@ func (g *ConnectionGroup) OpenStream() (net.Conn, error) {
 
 			stream, err := session.Open()
 			if err == nil {
-				*h = (*h)[:0]
-				sessionHeapPool.Put(h)
+				putSessionHeap(h)
 				return stream, nil
 			}
 			lastErr = err
@@ -317,8 +342,7 @@ func (g *ConnectionGroup) OpenStream() (net.Conn, error) {
 			}
 		}
 
-		*h = (*h)[:0]
-		sessionHeapPool.Put(h)
+		putSessionHeap(h)
 
 		if !anyUnderCap {
 			lastErr = fmt.Errorf("all sessions are at stream capacity (%d)", maxStreamsPerSession)

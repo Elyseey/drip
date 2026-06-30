@@ -61,7 +61,14 @@ func (c *Connection) handleTCPTunnel(reader *bufio.Reader) error {
 		c.lifecycleManager.SetProxy(c.proxy)
 	}
 
-	if err := c.proxy.Start(); err != nil {
+	var heldListener net.Listener
+	if c.portAlloc != nil {
+		if ln, ok := c.portAlloc.TakeListener(c.port); ok {
+			heldListener = ln
+		}
+	}
+
+	if err := c.proxy.StartWithListener(heldListener); err != nil {
 		return fmt.Errorf("failed to start tcp proxy: %w", err)
 	}
 

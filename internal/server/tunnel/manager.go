@@ -163,6 +163,14 @@ func (m *Manager) RegisterWithIP(conn *websocket.Conn, customSubdomain string, r
 		m.tunnelCount.Add(-1)
 	}
 
+	rateLimitConsumed := false
+	rollbackRateLimit := func() {
+		if rateLimitConsumed && remoteIP != "" {
+			m.rateLimiter.Decrement(remoteIP)
+			rateLimitConsumed = false
+		}
+	}
+
 	rollbackPerIP := func() {
 		if remoteIP != "" {
 			m.ipMu.Lock()
@@ -187,11 +195,13 @@ func (m *Manager) RegisterWithIP(conn *websocket.Conn, customSubdomain string, r
 			metrics.TunnelRegistrationFailures.WithLabelValues("rate_limit").Inc()
 			return "", ErrRateLimitExceeded
 		}
+		rateLimitConsumed = true
 
 		m.ipMu.Lock()
 		if m.tunnelsByIP[remoteIP] >= m.maxTunnelsPerIP {
 			currentPerIP := m.tunnelsByIP[remoteIP]
 			m.ipMu.Unlock()
+			rollbackRateLimit()
 			rollbackGlobal()
 			m.logger.Warn("Per-IP tunnel limit reached",
 				zap.String("ip", remoteIP),
@@ -230,17 +240,20 @@ func (m *Manager) RegisterWithIP(conn *websocket.Conn, customSubdomain string, r
 	if customSubdomain != "" {
 		// Validate custom subdomain
 		if !utils.ValidateSubdomain(customSubdomain) {
+			rollbackRateLimit()
 			rollbackPerIP()
 			rollbackGlobal()
 			return "", ErrInvalidSubdomain
 		}
 		if utils.IsReserved(customSubdomain) {
+			rollbackRateLimit()
 			rollbackPerIP()
 			rollbackGlobal()
 			return "", ErrReservedSubdomain
 		}
 
 		if !registerSubdomain(customSubdomain) {
+			rollbackRateLimit()
 			rollbackPerIP()
 			rollbackGlobal()
 			return "", ErrSubdomainTaken
@@ -274,6 +287,7 @@ func (m *Manager) RegisterWithIP(conn *websocket.Conn, customSubdomain string, r
 		}
 
 		if !registered {
+			rollbackRateLimit()
 			rollbackPerIP()
 			rollbackGlobal()
 			return "", ErrSubdomainGenerationFailed
