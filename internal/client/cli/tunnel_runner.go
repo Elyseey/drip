@@ -43,11 +43,11 @@ func runTunnelWithUI(connConfig *tcp.ConnectorConfig, daemonInfo *DaemonInfo) er
 		if err := connector.Connect(); err != nil {
 			if isConfigurationError(err) {
 				fmt.Println(ui.Warning(fmt.Sprintf("Configuration error: %v", err)))
-				os.Exit(1)
+				return fmt.Errorf("configuration error: %w", err)
 			}
 			if isNonRetryableError(err) {
 				fmt.Println(ui.RenderConnectionFailed(err))
-				os.Exit(1)
+				return err
 			}
 
 			reconnectAttempts++
@@ -177,6 +177,10 @@ func runTunnelWithUI(connConfig *tcp.ConnectorConfig, daemonInfo *DaemonInfo) er
 				// Closed successfully
 			case <-time.After(2 * time.Second):
 				fmt.Println(ui.Warning("Force closing (timeout)..."))
+				select {
+				case <-done:
+				case <-time.After(500 * time.Millisecond):
+				}
 			}
 
 			if daemonInfo != nil {

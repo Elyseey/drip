@@ -1,6 +1,9 @@
 package tcp
 
 import (
+	"errors"
+	"io"
+	"net"
 	"strings"
 	"time"
 
@@ -71,8 +74,13 @@ func NewTunnelClient(cfg *ConnectorConfig, logger *zap.Logger) TunnelClient {
 }
 
 func isExpectedCloseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
 	s := err.Error()
-	return strings.Contains(s, "EOF") ||
-		strings.Contains(s, "use of closed") ||
+	return strings.Contains(s, "session shutdown") ||
 		strings.Contains(s, "connection reset")
 }

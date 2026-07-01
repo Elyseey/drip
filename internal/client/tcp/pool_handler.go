@@ -135,9 +135,6 @@ func (c *PoolClient) handleHTTPStream(stream net.Conn) {
 	}
 	if isSSE {
 		_ = stream.SetWriteDeadline(time.Time{})
-	}
-
-	if isSSE && req.ContentLength == 0 {
 		stopWatchingDisconnect := watchStreamDisconnect(ctx, stream, cancel, resp.Body)
 		defer stopWatchingDisconnect()
 	}
@@ -238,6 +235,7 @@ func (c *PoolClient) handleWebSocketUpgrade(cc net.Conn, req *http.Request) {
 		httputil.WriteProxyError(cc, http.StatusBadGateway, "Failed to read upgrade response")
 		return
 	}
+	defer resp.Body.Close()
 
 	if err := resp.Write(cc); err != nil {
 		return

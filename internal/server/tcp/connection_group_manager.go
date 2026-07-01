@@ -102,27 +102,33 @@ func (m *ConnectionGroupManager) cleanupLoop() {
 }
 
 func (m *ConnectionGroupManager) cleanupStaleGroups() {
-	// Collect stale groups under lock
 	m.mu.Lock()
 	var staleGroups []*ConnectionGroup
-	var staleIDs []string
-	for tunnelID, group := range m.groups {
+	for _, group := range m.groups {
 		if group.IsStale(m.staleTimeout) {
-			staleIDs = append(staleIDs, tunnelID)
 			staleGroups = append(staleGroups, group)
 		}
 	}
-
-	// Remove from map while holding lock
-	for _, tunnelID := range staleIDs {
-		delete(m.groups, tunnelID)
-	}
 	m.mu.Unlock()
 
-	// Close groups without holding lock to avoid blocking other operations
 	for _, group := range staleGroups {
-		group.Close()
+		if group.PrimaryConn != nil {
+			group.PrimaryConn.Close()
+			// PrimaryConn lifecycle may call RemoveGroup, but only when the group is
+			// still in the map. Always close the group explicitly so heartbeat and
+			// data sessions are torn down even if the map entry was already removed.
+			group.Close()
+			m.removeGroupEntry(group.TunnelID)
+			continue
+		}
+		m.RemoveGroup(group.TunnelID)
 	}
+}
+
+func (m *ConnectionGroupManager) removeGroupEntry(tunnelID string) {
+	m.mu.Lock()
+	delete(m.groups, tunnelID)
+	m.mu.Unlock()
 }
 
 // Close shuts down the manager

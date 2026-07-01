@@ -61,6 +61,7 @@ func (c *Connection) Send(data []byte) error {
 
 	select {
 	case c.SendCh <- data:
+		c.UpdateActivity()
 		return nil
 	case <-timer.C:
 		return ErrSendTimeout
@@ -134,6 +135,7 @@ func (c *Connection) OpenStream() (net.Conn, error) {
 	if open == nil {
 		return nil, ErrConnectionClosed
 	}
+	c.UpdateActivity()
 	return open()
 }
 
@@ -141,6 +143,7 @@ func (c *Connection) AddBytesIn(n int64) {
 	if n <= 0 {
 		return
 	}
+	c.UpdateActivity()
 	c.bytesIn.Add(n)
 	metrics.BytesReceived.Add(float64(n))
 	metrics.TunnelBytesReceived.WithLabelValues(c.Subdomain, c.Subdomain, c.tunnelTypeStr).Add(float64(n))
@@ -150,6 +153,7 @@ func (c *Connection) AddBytesOut(n int64) {
 	if n <= 0 {
 		return
 	}
+	c.UpdateActivity()
 	c.bytesOut.Add(n)
 	metrics.BytesSent.Add(float64(n))
 	metrics.TunnelBytesSent.WithLabelValues(c.Subdomain, c.Subdomain, c.tunnelTypeStr).Add(float64(n))

@@ -157,6 +157,8 @@ func startMultipleTunnels(cfg *config.ClientConfig, tunnels []*config.TunnelConf
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(tunnels))
 	stopChan := make(chan struct{})
+	var clientsMu sync.Mutex
+	var clients []tcp.TunnelClient
 
 	// Handle interrupt signal
 	sigChan := make(chan os.Signal, 1)
@@ -182,7 +184,6 @@ func startMultipleTunnels(cfg *config.ClientConfig, tunnels []*config.TunnelConf
 
 			client := tcp.NewTunnelClient(connConfig, logger)
 
-			// Connect
 			if err := client.Connect(); err != nil {
 				errChan <- fmt.Errorf("%s: %w", tunnel.Name, err)
 				return
@@ -190,34 +191,32 @@ func startMultipleTunnels(cfg *config.ClientConfig, tunnels []*config.TunnelConf
 
 			fmt.Printf("  ✓ %s: %s\n", tunnel.Name, client.GetURL())
 
-			// Run until stopped
-			<-stopChan
-			_ = client.Close()
+			clientsMu.Lock()
+			clients = append(clients, client)
+			clientsMu.Unlock()
 		}(t)
 	}
 
-	// Wait for interrupt or error
-	go func() {
-		wg.Wait()
-		close(errChan)
-	}()
+	wg.Wait()
+	close(errChan)
 
-	// Collect errors
 	var errors []error
 	for err := range errChan {
 		errors = append(errors, err)
 		fmt.Printf("  ✗ %v\n", err)
 	}
 
-	// Wait for signal if no errors
-	if len(errors) == 0 {
-		<-stopChan
+	if len(errors) > 0 {
+		for _, client := range clients {
+			_ = client.Close()
+		}
+		return fmt.Errorf("%d tunnel(s) failed to start", len(errors))
 	}
 
-	wg.Wait()
+	<-stopChan
 
-	if len(errors) > 0 {
-		return fmt.Errorf("%d tunnel(s) failed to start", len(errors))
+	for _, client := range clients {
+		_ = client.Close()
 	}
 
 	return nil

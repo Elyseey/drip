@@ -81,11 +81,17 @@ func (p *Proxy) SetLimiter(limiter interface{ IsLimited() bool }) {
 }
 
 func (p *Proxy) Start() error {
-	addr := fmt.Sprintf("0.0.0.0:%d", p.port)
+	return p.StartWithListener(nil)
+}
 
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("failed to listen on port %d: %w", p.port, err)
+func (p *Proxy) StartWithListener(ln net.Listener) error {
+	if ln == nil {
+		addr := fmt.Sprintf("0.0.0.0:%d", p.port)
+		var err error
+		ln, err = net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("failed to listen on port %d: %w", p.port, err)
+		}
 	}
 	p.listener = ln
 

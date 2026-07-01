@@ -112,6 +112,10 @@ func runConfigInit(_ *cobra.Command, _ []string) error {
 		TLS:    true,
 	}
 
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+
 	if err := config.SaveClientConfig(cfg, ""); err != nil {
 		return fmt.Errorf("failed to save configuration: %w", err)
 	}
@@ -201,6 +205,10 @@ func runConfigSet(_ *cobra.Command, _ []string) error {
 
 	if !modified {
 		return fmt.Errorf("no changes specified. Use --server or --token")
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
 	if err := config.SaveClientConfig(cfg, ""); err != nil {

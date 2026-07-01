@@ -67,6 +67,28 @@ func (rl *RateLimiter) CheckAndIncrement(ip string) bool {
 	return true
 }
 
+// Decrement rolls back a previous successful CheckAndIncrement for failed registrations.
+func (rl *RateLimiter) Decrement(ip string) {
+	if ip == "" {
+		return
+	}
+
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	entry, exists := rl.rateLimits[ip]
+	if !exists {
+		return
+	}
+
+	if entry.count > 0 {
+		entry.count--
+	}
+	if entry.count == 0 {
+		delete(rl.rateLimits, ip)
+	}
+}
+
 // Cleanup removes expired rate limit entries.
 func (rl *RateLimiter) Cleanup() int {
 	rl.mu.Lock()

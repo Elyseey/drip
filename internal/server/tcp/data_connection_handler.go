@@ -85,7 +85,15 @@ func (h *DataConnectionHandler) Handle(frame *protocol.Frame) error {
 		return fmt.Errorf("tunnel not found: %s", req.TunnelID)
 	}
 
-	if group.Token != "" && subtle.ConstantTimeCompare([]byte(req.Token), []byte(group.Token)) != 1 {
+	expectedToken := h.authToken
+	if group.Token != "" {
+		expectedToken = group.Token
+	}
+	if expectedToken == "" {
+		h.sendError("authentication_failed", "Authentication required for data connections")
+		return fmt.Errorf("authentication required for data connection")
+	}
+	if subtle.ConstantTimeCompare([]byte(req.Token), []byte(expectedToken)) != 1 {
 		h.sendError("authentication_failed", "Invalid authentication token")
 		return fmt.Errorf("authentication failed for data connection")
 	}

@@ -21,9 +21,6 @@ func buildDaemonArgs(tunnelType string, args []string, subdomain string, localAd
 	if serverURL != "" {
 		daemonArgs = append(daemonArgs, "--server", serverURL)
 	}
-	if authToken != "" {
-		daemonArgs = append(daemonArgs, "--token", authToken)
-	}
 	if authPass != "" {
 		daemonArgs = append(daemonArgs, "--auth", authPass)
 	}
@@ -56,8 +53,13 @@ func buildDaemonArgs(tunnelType string, args []string, subdomain string, localAd
 }
 
 func resolveServerAddrAndToken(tunnelType string, port int) (string, string, error) {
+	token := authToken
+	if token == "" {
+		token = os.Getenv("DRIP_TOKEN")
+	}
+
 	if serverURL != "" {
-		return serverURL, authToken, nil
+		return serverURL, token, nil
 	}
 
 	cfg, err := config.LoadClientConfig("")
@@ -72,7 +74,27 @@ Please run 'drip config init' first, or use flags:
 		return "", "", fmt.Errorf("server address is required")
 	}
 
-	return cfg.Server, cfg.Token, nil
+	if token == "" {
+		token = cfg.Token
+	}
+
+	return cfg.Server, token, nil
+}
+
+func resolveDaemonToken(args []string) string {
+	if authToken != "" {
+		return authToken
+	}
+	if token := os.Getenv("DRIP_TOKEN"); token != "" {
+		return token
+	}
+	if token := parseFlagValue(args, "--token", "-t", ""); token != "" {
+		return token
+	}
+	if cfg, err := config.LoadClientConfig(""); err == nil {
+		return cfg.Token
+	}
+	return ""
 }
 
 func newDaemonInfo(tunnelType string, port int, subdomain string, serverAddr string) *DaemonInfo {
