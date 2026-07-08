@@ -115,12 +115,51 @@ func (g *ConnectionGroup) heartbeatLoop(interval, timeout time.Duration) {
 	const maxConsecutiveFailures = 3
 	failureCount := make(map[string]int)
 	pingInFlight := make(map[string]bool)
+	// pendingDone tracks Ping results that outlived their wait timeout so we
+	// never start overlapping pings (and leak goroutines) on a wedged session.
+	pendingDone := make(map[string]<-chan error)
 
 	type sessionSnapshot struct {
 		id      string
 		session *yamux.Session
 	}
 	sessions := make([]sessionSnapshot, 0, 16)
+
+	handlePingResult := func(id string, err error) {
+		if err != nil {
+			failureCount[id]++
+			g.logger.Debug("Session ping failed",
+				zap.String("session_id", id),
+				zap.Int("consecutive_failures", failureCount[id]),
+				zap.Error(err),
+			)
+
+			if failureCount[id] >= maxConsecutiveFailures {
+				if id == "primary" {
+					g.logger.Warn("Primary session ping failed repeatedly, keeping session alive",
+						zap.String("session_id", id),
+						zap.Int("failures", failureCount[id]),
+					)
+					failureCount[id] = 0
+				} else {
+					g.logger.Warn("Session ping failed too many times, removing",
+						zap.String("session_id", id),
+						zap.Int("failures", failureCount[id]),
+					)
+					g.RemoveSession(id)
+					delete(failureCount, id)
+					delete(pingInFlight, id)
+					delete(pendingDone, id)
+				}
+			}
+			return
+		}
+
+		failureCount[id] = 0
+		g.mu.Lock()
+		g.LastActivity = time.Now()
+		g.mu.Unlock()
+	}
 
 	for {
 		select {
@@ -140,6 +179,24 @@ func (g *ConnectionGroup) heartbeatLoop(interval, timeout time.Duration) {
 			if snap.session == nil || snap.session.IsClosed() {
 				g.RemoveSession(snap.id)
 				delete(failureCount, snap.id)
+				delete(pingInFlight, snap.id)
+				delete(pendingDone, snap.id)
+				continue
+			}
+
+			if ch, ok := pendingDone[snap.id]; ok {
+				select {
+				case err := <-ch:
+					delete(pendingDone, snap.id)
+					delete(pingInFlight, snap.id)
+					// Timeout already counted as a failure; only apply a late
+					// success so we can clear the failure streak.
+					if err == nil {
+						handlePingResult(snap.id, nil)
+					}
+				default:
+					// Previous ping still running; do not start another.
+				}
 				continue
 			}
 
@@ -157,43 +214,17 @@ func (g *ConnectionGroup) heartbeatLoop(interval, timeout time.Duration) {
 			var err error
 			select {
 			case err = <-done:
+				delete(pingInFlight, snap.id)
+				handlePingResult(snap.id, err)
 			case <-time.After(timeout):
-				err = fmt.Errorf("ping timeout")
+				// Keep pingInFlight set and wait for the real completion on a
+				// later tick so overlapping Ping goroutines cannot accumulate.
+				pendingDone[snap.id] = done
+				handlePingResult(snap.id, fmt.Errorf("ping timeout"))
 			case <-g.stopCh:
 				delete(pingInFlight, snap.id)
+				delete(pendingDone, snap.id)
 				return
-			}
-			delete(pingInFlight, snap.id)
-
-			if err != nil {
-				failureCount[snap.id]++
-				g.logger.Debug("Session ping failed",
-					zap.String("session_id", snap.id),
-					zap.Int("consecutive_failures", failureCount[snap.id]),
-					zap.Error(err),
-				)
-
-				if failureCount[snap.id] >= maxConsecutiveFailures {
-					if snap.id == "primary" {
-						g.logger.Warn("Primary session ping failed repeatedly, keeping session alive",
-							zap.String("session_id", snap.id),
-							zap.Int("failures", failureCount[snap.id]),
-						)
-						failureCount[snap.id] = 0
-					} else {
-						g.logger.Warn("Session ping failed too many times, removing",
-							zap.String("session_id", snap.id),
-							zap.Int("failures", failureCount[snap.id]),
-						)
-						g.RemoveSession(snap.id)
-						delete(failureCount, snap.id)
-					}
-				}
-			} else {
-				failureCount[snap.id] = 0
-				g.mu.Lock()
-				g.LastActivity = time.Now()
-				g.mu.Unlock()
 			}
 		}
 

@@ -371,27 +371,25 @@ func (h *Handler) openStreamWithTimeout(tconn *tunnel.Connection) (net.Conn, err
 }
 
 func (h *Handler) openStream(tconn *tunnel.Connection, timeout time.Duration) (net.Conn, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	ch := make(chan streamResult)
+	// Buffered so OpenStream can always complete without blocking; the timeout
+	// path asynchronously drains and closes any late stream.
+	ch := make(chan streamResult, 1)
 
 	go func() {
 		s, err := tconn.OpenStream()
-		select {
-		case ch <- streamResult{s, err}:
-		case <-ctx.Done():
-			if s != nil {
-				_ = s.Close()
-			}
-		}
+		ch <- streamResult{s, err}
 	}()
 
 	select {
 	case r := <-ch:
 		return r.stream, r.err
 	case <-time.After(timeout):
-		cancel()
+		go func() {
+			r := <-ch
+			if r.stream != nil {
+				_ = r.stream.Close()
+			}
+		}()
 		return nil, fmt.Errorf("open stream timeout")
 	}
 }

@@ -220,19 +220,19 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	}
 	resultCh := make(chan streamResult, 1)
 
-	ctx, cancel := context.WithTimeout(p.ctx, openStreamTimeout)
-	defer cancel()
-
 	go func() {
 		s, err := p.openStream()
-		select {
-		case resultCh <- streamResult{s, err}:
-		case <-ctx.Done():
-			if s != nil {
-				_ = s.Close()
-			}
-		}
+		resultCh <- streamResult{s, err}
 	}()
+
+	drainLateResult := func() {
+		go func() {
+			result := <-resultCh
+			if result.stream != nil {
+				_ = result.stream.Close()
+			}
+		}()
+	}
 
 	var stream net.Conn
 	select {
@@ -244,10 +244,15 @@ func (p *Proxy) handleConn(conn net.Conn) {
 			return
 		}
 		stream = result.stream
-	case <-ctx.Done():
+	case <-time.After(openStreamTimeout):
+		drainLateResult()
 		p.logger.Debug("Open stream timeout")
 		return
 	case <-p.stopCh:
+		drainLateResult()
+		return
+	case <-p.ctx.Done():
+		drainLateResult()
 		return
 	}
 
