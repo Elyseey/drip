@@ -168,10 +168,16 @@ func (c *Connection) IncActiveConnections() {
 }
 
 func (c *Connection) DecActiveConnections() {
-	if v := c.activeConnections.Add(-1); v < 0 {
-		c.activeConnections.Store(0)
+	for {
+		current := c.activeConnections.Load()
+		if current <= 0 {
+			return
+		}
+		if c.activeConnections.CompareAndSwap(current, current-1) {
+			metrics.TunnelActiveConnections.WithLabelValues(c.Subdomain, c.Subdomain, c.tunnelTypeStr).Dec()
+			return
+		}
 	}
-	metrics.TunnelActiveConnections.WithLabelValues(c.Subdomain, c.Subdomain, c.tunnelTypeStr).Dec()
 }
 
 func (c *Connection) GetActiveConnections() int64 { return c.activeConnections.Load() }

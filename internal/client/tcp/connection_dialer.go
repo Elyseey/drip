@@ -140,9 +140,13 @@ func (d *ConnectionDialer) dialWebSocket() (net.Conn, error) {
 	ws, resp, err := dialer.Dial(wsURL, header)
 	if err != nil {
 		if resp != nil {
+			_ = resp.Body.Close()
 			return nil, fmt.Errorf("WebSocket dial failed (status %d): %w", resp.StatusCode, err)
 		}
 		return nil, fmt.Errorf("WebSocket dial failed: %w", err)
+	}
+	if resp != nil {
+		_ = resp.Body.Close()
 	}
 
 	d.logger.Info("Connected via WebSocket over TLS",

@@ -15,6 +15,7 @@ type connQueueListener struct {
 	done   chan struct{}
 	once   sync.Once
 	closed atomic.Bool
+	mu     sync.Mutex // serializes Enqueue with Close to avoid post-close queue leaks
 }
 
 func newConnQueueListener(addr net.Addr, buffer int) *connQueueListener {
@@ -42,8 +43,10 @@ func (l *connQueueListener) Accept() (net.Conn, error) {
 
 func (l *connQueueListener) Close() error {
 	l.once.Do(func() {
+		l.mu.Lock()
 		l.closed.Store(true)
 		close(l.done)
+		l.mu.Unlock()
 		l.drain()
 	})
 	return nil
@@ -55,6 +58,10 @@ func (l *connQueueListener) Enqueue(conn net.Conn) bool {
 	if conn == nil {
 		return false
 	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	if l.closed.Load() {
 		return false
 	}

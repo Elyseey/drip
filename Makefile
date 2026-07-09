@@ -1,4 +1,4 @@
-.PHONY: all build build-all clean test run-server run-client install deps fmt lint
+.PHONY: all build build-all clean test e2e run-server run-client install deps fmt lint
 
 # Variables
 BINARY=bin/drip
@@ -50,6 +50,10 @@ build-all: clean
 # Run tests
 test:
 	go test -v -race -cover ./...
+
+# Full end-to-end functional tests (starts local server/client/backends)
+e2e: build
+	bash scripts/test/e2e-full.sh
 
 # Run tests with coverage
 test-coverage:
@@ -116,7 +120,8 @@ help:
 	@echo ""
 	@echo "  make build        - Build server and client"
 	@echo "  make build-all    - Build for all platforms"
-	@echo "  make test         - Run tests"
+	@echo "  make test         - Run unit tests"
+	@echo "  make e2e          - Run full end-to-end functional tests"
 	@echo "  make test-coverage - Run tests with coverage report"
 	@echo "  make bench        - Run benchmark tests"
 	@echo "  make run-server   - Run server locally"

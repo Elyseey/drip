@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	json "github.com/goccy/go-json"
+	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 
 	"drip/internal/server/tunnel"
@@ -11,9 +12,16 @@ import (
 	"drip/internal/shared/utils"
 )
 
+// tunnelManager is the subset of tunnel.Manager used during registration.
+type tunnelManager interface {
+	RegisterWithIP(conn *websocket.Conn, customSubdomain string, remoteIP string) (string, error)
+	Get(subdomain string) (*tunnel.Connection, bool)
+	Unregister(subdomain string)
+}
+
 // RegistrationHandler handles tunnel registration logic.
 type RegistrationHandler struct {
-	manager      *tunnel.Manager
+	manager      tunnelManager
 	portAlloc    *PortAllocator
 	groupManager *ConnectionGroupManager
 	domain       string
@@ -24,7 +32,7 @@ type RegistrationHandler struct {
 
 // NewRegistrationHandler creates a new registration handler.
 func NewRegistrationHandler(
-	manager *tunnel.Manager,
+	manager tunnelManager,
 	portAlloc *PortAllocator,
 	groupManager *ConnectionGroupManager,
 	domain, tunnelDomain string,
@@ -103,9 +111,17 @@ func (rh *RegistrationHandler) Register(req *RegistrationRequest) (*Registration
 		return nil, fmt.Errorf("tunnel registration failed: %w", err)
 	}
 
+	releaseRegistration := func() {
+		rh.manager.Unregister(subdomain)
+		if port > 0 && rh.portAlloc != nil {
+			rh.portAlloc.Release(port)
+		}
+	}
+
 	// Get tunnel connection
 	tunnelConn, ok := rh.manager.Get(subdomain)
 	if !ok {
+		releaseRegistration()
 		return nil, fmt.Errorf("failed to get registered tunnel")
 	}
 
